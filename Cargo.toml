@@ -15,6 +15,21 @@ name = "xeedee"
 path = "src/bin/xeedee.rs"
 required-features = ["cli"]
 
+# One-shot reverse-engineering tools kept for future debugging. They
+# don't exercise the library API; treat them as scripts.
+[[example]]
+name = "cmdtbl"
+path = "dev-tools/cmdtbl.rs"
+
+[[example]]
+name = "ppcdis"
+path = "dev-tools/ppcdis.rs"
+required-features = ["dangerous"]
+
+[[example]]
+name = "xexgrep"
+path = "dev-tools/xexgrep.rs"
+
 [dependencies]
 bytes = "1.11.1"
 clap = { version = "4.6.1", features = ["derive", "env"], optional = true }
@@ -49,12 +64,12 @@ cli = [
 tokio = ["dep:tokio", "dep:tokio-util"]
 jiff = ["dep:jiff"]
 image = ["dep:image"]
-# Video capture support. Currently targets xbmovie's `PIX!{...}` dialect,
-# which is a later-XDK variant. The xdk-main-nov11 kernel (which
-# deanxbox runs) exposes the movie subsystem via `pixcmd <subcommand>`
-# instead. See commands/pix/mod.rs for the full story. The module
-# compiles cleanly but is not wired in by default until we re-target it
-# to the real `pixcmd` protocol.
+# Video capture (xbmovie PIX! protocol) + `.xbm` decode toolchain.
+# The `capture` subcommand drives the on-console recording; the
+# `xbm info`/`xbm extract` subcommands parse the intermediate
+# `.xbm` files xbdm produces (tiled YUV 4:2:0 frames + PCM audio in
+# a custom container). Encoding to MP4/H.264 is delegated to an
+# ffmpeg subprocess.
 capture = []
 # Dangerous, low-level commands that write into xbdm's code, dispatch
 # table, or data globals. These target specific structural patterns
@@ -69,3 +84,4 @@ lto = "thin"
 futures = "0.3.32"
 insta = "1.47.2"
 tokio = { version = "1.52.1", features = ["full"] }
+xex2 = "0.1.0"

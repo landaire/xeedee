@@ -61,6 +61,8 @@ use xeedee::commands::dangerous::drivemap as dm;
 use xeedee::commands::pix::CaptureSession;
 #[cfg(feature = "capture")]
 use xeedee::commands::pix::Notification;
+#[cfg(feature = "capture")]
+use xeedee::commands::pix::PixCmd;
 use xeedee::error::Error;
 use xeedee::transport::CaptureLog;
 use xeedee::transport::RecordingTransport;
@@ -228,10 +230,10 @@ enum Command {
         /// Maximum recursion depth. 0 means unlimited.
         #[arg(long, default_value_t = 0u32)]
         max_depth: u32,
-        /// Include files in the output (default is directories-only, a
-        /// la `tree -d`). Use `--files` to include leaf files too.
-        #[arg(long)]
-        files: bool,
+        /// Hide files and print only directories (like `tree -d`). Off
+        /// by default, so leaf files are shown alongside directories.
+        #[arg(long = "dirs-only", short = 'd')]
+        dirs_only: bool,
     },
 
     /// Show metadata for a remote file or directory.
@@ -421,28 +423,72 @@ enum Command {
         raw: bool,
     },
 
-    /// Drive the PIX movie-capture session on the console. Emits raw
-    /// intermediate segments to the console's HDD, downloads them to
-    /// the local `--output-dir`, and prints a notification log. Does
-    /// not transcode to WMV/MP4 yet -- that's Phase 2.
+    /// Drive an xbmovie-style PIX! movie capture session against the
+    /// title currently registered as the PIX handler (dash.xex,
+    /// xshell.xex, or the running game). Emits intermediate capture
+    /// segments to the console's HDD, downloads them back, and (by
+    /// default) auto-converts each to H.264 MP4 via ffmpeg.
     #[cfg(feature = "capture")]
     Capture {
-        /// Device-side filename (without the
-        /// `\Device\Harddisk0\Partition1\DEVKIT\` prefix that xbmovie
-        /// traditionally adds); xeedee passes this through verbatim.
-        #[arg(long, default_value = "DEVKIT:\\xeedee_capture.wmv")]
+        /// Device-side filename. The path is sent verbatim to the PIX
+        /// handler. xbmovie uses the full NT device form
+        /// `\Device\Harddisk0\Partition1\DEVKIT\<name>.xbm` and the
+        /// handler produces numbered segment files `<name>N.xbm`. The
+        /// default matches xbmovie's.
+        #[arg(
+            long,
+            default_value = r"\Device\Harddisk0\Partition1\DEVKIT\xeedee_capture.xbm"
+        )]
         remote: String,
-        /// Per-segment size cap in megabytes. Default 512 matches xbmovie.
-        #[arg(long, default_value_t = 512)]
+        /// Per-segment size cap in megabytes. xbmovie's default is
+        /// 12285 (effectively "whole HDD"); we match that.
+        #[arg(long, default_value_t = 12285)]
         size_limit_mb: u32,
-        /// Capture duration in seconds. If unset, capture continues
-        /// until you press Enter.
+        /// Capture duration in seconds. If unset, capture runs until
+        /// Enter is pressed.
         #[arg(long)]
         duration: Option<u64>,
         /// Local directory to drop downloaded segments into.
         #[arg(long, default_value = "./xeedee-capture")]
         output_dir: String,
+        /// Skip the automatic `.xbm` -> `.mp4` conversion and leave
+        /// the raw intermediate files in place for later processing.
+        /// Without this flag the command shells out to ffmpeg after
+        /// download, encodes each segment alongside as `<name>.mp4`,
+        /// and deletes the `.xbm` on success.
+        #[arg(long)]
+        no_conversion: bool,
     },
+
+    /// Send a raw `pixcmd <subcommand>` (the PIX performance profiler,
+    /// not video capture) and print the reply. Used for poking at the
+    /// xbdm-resident profiler subsystem.
+    #[cfg(feature = "capture")]
+    PixcmdProbe {
+        /// Positional subcommand, e.g. `v 0 0 0 0`. Sent verbatim
+        /// after `pixcmd `.
+        subcommand: String,
+    },
+
+    /// Listen to the xbdm notification channel and log every line
+    /// tagged with its parsed classification (capture notifications,
+    /// PIX profiler events, or raw). Useful to correlate commands
+    /// with the async events they emit.
+    #[cfg(feature = "capture")]
+    PixNotify {
+        /// How long to listen (seconds). 0 = until Ctrl-C.
+        #[arg(long, default_value_t = 0)]
+        duration: u64,
+        /// Also tee every line to this file.
+        #[arg(long)]
+        log: Option<String>,
+    },
+
+    /// Operate on a local `.xbm` capture file (xbmovie intermediate
+    /// format produced by the `capture` subcommand).
+    #[cfg(feature = "capture")]
+    #[command(subcommand)]
+    Xbm(XbmCommand),
 
     /// Send a raw command line and print the parsed response.
     Raw {
@@ -456,6 +502,66 @@ enum Command {
     #[cfg(feature = "dangerous")]
     #[command(subcommand)]
     Dangerous(DangerousCommand),
+}
+
+#[cfg(feature = "capture")]
+#[derive(Subcommand, Debug)]
+enum XbmCommand {
+    /// Print the .xbm file's top-level header plus a summary of
+    /// frame records (count, total duration, audio bytes).
+    Info {
+        /// Path to the `.xbm` file on the local filesystem.
+        file: String,
+    },
+    /// Extract each frame's pixel data into a sequence of raw
+    /// files. By default the on-device tiled layout is converted to
+    /// plain NV12 so ffmpeg can consume the result directly.
+    Extract {
+        /// Path to the `.xbm` file on the local filesystem.
+        file: String,
+        /// Output directory; created if missing.
+        #[arg(short, long, default_value = "./xbm-frames")]
+        output_dir: String,
+        /// Concatenate all frames into a single `frames.nv12` (or
+        /// `.tiled` for `--raw`) alongside the per-frame files.
+        #[arg(long)]
+        concat: bool,
+        /// Skip detiling; emit the raw on-device 16-wide column
+        /// layout verbatim. Only useful for format research.
+        #[arg(long)]
+        raw: bool,
+    },
+
+    /// Encode a `.xbm` to an MP4 (or anything ffmpeg groks) by
+    /// streaming detiled NV12 frames to ffmpeg over stdin. No
+    /// temporary files. Requires `ffmpeg` on $PATH.
+    Encode {
+        /// Source `.xbm` file.
+        file: String,
+        /// Output file. Extension picks the container (e.g.
+        /// `out.mp4`, `out.mkv`).
+        #[arg(short, long, default_value = "capture.mp4")]
+        output: String,
+        /// Crop the aligned frame down to the meaningful pixel
+        /// rectangle before encoding. Default is the header's
+        /// `frame_width x frame_height` (drops the 32-alignment
+        /// tail). Set to `source` to crop to the smaller
+        /// `source_width x source_height` rectangle instead, or
+        /// `none` for the full aligned frame.
+        #[arg(long, default_value = "frame")]
+        crop: String,
+        /// Override the computed fps. Leave at 0 to use the value
+        /// derived from the file's timestamp span.
+        #[arg(long, default_value_t = 0.0)]
+        fps: f64,
+        /// x264 quality (lower = better, ~18-23 typical).
+        #[arg(long, default_value_t = 20)]
+        crf: u32,
+        /// Extra ffmpeg args appended verbatim before the output
+        /// file. Useful for `-ss`, `-t`, `-vf` filters, etc.
+        #[arg(long)]
+        ffmpeg_args: Vec<String>,
+    },
 }
 
 #[cfg(feature = "dangerous")]
@@ -601,6 +707,12 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
         _ => {}
     }
 
+    // `xbm` operates on local files only; no console connection needed.
+    #[cfg(feature = "capture")]
+    if let Command::Xbm(sub) = &cli.cmd {
+        return run_xbm(sub).await;
+    }
+
     let host = cli.host.as_deref().ok_or_else(|| {
         rootcause::Report::new(Error::from(xeedee::error::ArgumentError::EmptyFilename))
             .attach("--host is required for this subcommand")
@@ -620,6 +732,33 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
         }
         Command::Dangerous(DangerousCommand::NandDump { output }) => {
             return run_nand_dump(&target, conn_timeout, output.clone(), ui).await;
+        }
+        _ => {}
+    }
+
+    #[cfg(feature = "capture")]
+    match &cli.cmd {
+        Command::PixNotify { duration, log } => {
+            return run_pix_notify(&target, conn_timeout, *duration, log.clone()).await;
+        }
+        Command::Capture {
+            remote,
+            size_limit_mb,
+            duration,
+            output_dir,
+            no_conversion,
+        } => {
+            return run_capture(
+                &target,
+                conn_timeout,
+                remote.clone(),
+                *size_limit_mb,
+                duration.map(Duration::from_secs),
+                output_dir.clone(),
+                *no_conversion,
+                ui,
+            )
+            .await;
         }
         _ => {}
     }
@@ -884,9 +1023,9 @@ where
         Command::Tree {
             path,
             max_depth,
-            files,
+            dirs_only,
         } => {
-            run_tree(&mut client, path, max_depth, files, ui).await?;
+            run_tree(&mut client, path, max_depth, !dirs_only, ui).await?;
         }
         Command::Ls {
             path,
@@ -1506,21 +1645,20 @@ where
             }
         }
         #[cfg(feature = "capture")]
-        Command::Capture {
-            remote,
-            size_limit_mb,
-            duration,
-            output_dir,
-        } => {
-            run_capture(
-                &mut client,
-                &remote,
-                size_limit_mb,
-                duration.map(Duration::from_secs),
-                &output_dir,
-                &ui,
-            )
-            .await?;
+        Command::Capture { .. } => {
+            unreachable!("Capture is handled by run_capture before drive_connected")
+        }
+        #[cfg(feature = "capture")]
+        Command::PixcmdProbe { subcommand } => {
+            run_pixcmd_probe(&mut client, &subcommand).await?;
+        }
+        #[cfg(feature = "capture")]
+        Command::PixNotify { .. } => {
+            unreachable!("PixNotify is handled by run_pix_notify before drive_connected")
+        }
+        #[cfg(feature = "capture")]
+        Command::Xbm(_) => {
+            unreachable!("Xbm is handled by run_xbm before drive_connected")
         }
         Command::Raw { line } => {
             let resp = client.send_raw(&line).await?;
@@ -1778,28 +1916,150 @@ fn print_hex_dump(base: u32, data: &[u8], unmapped: &[u32]) {
 }
 
 #[cfg(feature = "capture")]
-async fn run_capture<T>(
+async fn run_pixcmd_probe<T>(
     client: &mut xeedee::Client<T, xeedee::Connected>,
-    remote: &str,
-    size_limit_mb: u32,
-    duration: Option<Duration>,
-    output_dir: &str,
-    ui: &UiCtx,
+    subcommand: &str,
 ) -> Result<(), rootcause::Report<Error>>
 where
     T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
 {
-    std::fs::create_dir_all(output_dir)
+    let mut session = PixCmd::new(client);
+    let resp = session.raw(subcommand).await?;
+    println!("{resp:#?}");
+    Ok(())
+}
+
+#[cfg(feature = "capture")]
+async fn run_capture(
+    target: &Target,
+    conn_timeout: Duration,
+    remote: String,
+    size_limit_mb: u32,
+    duration: Option<Duration>,
+    output_dir: String,
+    no_conversion: bool,
+    ui: UiCtx,
+) -> Result<(), rootcause::Report<Error>> {
+    use futures_util::io::AsyncBufReadExt as _;
+    use futures_util::io::BufReader;
+    use tokio::sync::mpsc;
+
+    std::fs::create_dir_all(&output_dir)
         .map_err(Error::from)
         .into_report()
         .attach_with(|| format!("creating local output dir {output_dir}"))?;
 
-    let mut session = CaptureSession::connect(client).await?;
-    eprintln!("{} pix session ready", ok_tag("connected"));
+    // ── Notify channel (2nd connection) ─────────────────────────────
+    // Capture file-creation and capture-end are async; the handler
+    // only signals completion on the notify channel. Subscribe first
+    // so no events are missed.
+    let notify_transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut notify_client = xeedee::Client::new(notify_transport).read_banner().await?;
+    let _ack = notify_client.send_raw("notify reverse").await?;
+
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<Notification>();
+    let mut notify_raw = notify_client.into_inner();
+    let notify_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(&mut notify_raw);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if let Some(n) = Notification::parse(trimmed) {
+                        if notify_tx.send(n).is_err() {
+                            break;
+                        }
+                    } else {
+                        tracing::debug!(target: "xeedee::pix", line = %trimmed, "non-pix notify line");
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // ── Command channel (main connection) ───────────────────────────
+    let cmd_transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut client = xeedee::Client::new(cmd_transport).read_banner().await?;
+
+    let (mut session, handler_detected) = CaptureSession::connect(&mut client).await?;
+    if handler_detected {
+        eprintln!(
+            "{} PIX handler responded to {{Connect}}",
+            ok_tag("connected")
+        );
+    } else {
+        eprintln!(
+            "{} no title has registered as the PIX handler (got plain `OK`). \
+             Continuing anyway, but subsequent commands will likely no-op.",
+            warn_tag("warning:")
+        );
+    }
 
     session.limit_capture_size_mb(size_limit_mb).await?;
-    session.begin_capture_file_creation(remote).await?;
-    eprintln!("{} prepared capture -> {remote}", ok_tag("ready"));
+    session.begin_capture_file_creation(&remote).await?;
+    eprintln!(
+        "{} requested capture file -> {remote}, waiting for \
+         {{CaptureFileCreationEnded}} on notify channel",
+        ok_tag("prepared"),
+    );
+
+    // The handler ACKs {BeginCaptureFileCreation} immediately but
+    // actual readiness is signalled asynchronously. Block until we
+    // see PIX!{CaptureFileCreationEnded} <hresult>. The hresult is
+    // on the notification line as a trailing hex; a 0 means success.
+    // Give up after 30s and surface a clearer error than the eventual
+    // "0 segments".
+    const FILE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+    match tokio::time::timeout(FILE_READY_TIMEOUT, async {
+        loop {
+            match notify_rx.recv().await {
+                Some(Notification::CaptureFileCreationEnded { index }) => {
+                    // The `index` field here is the hresult from the
+                    // notification line; a 0 means S_OK.
+                    return Ok::<_, rootcause::Report<Error>>(index);
+                }
+                Some(other) => {
+                    tracing::debug!(
+                        target: "xeedee::pix",
+                        ?other,
+                        "notify while waiting for CaptureFileCreationEnded",
+                    );
+                }
+                None => {
+                    return Err(rootcause::Report::new(Error::from(
+                        xeedee::error::ArgumentError::EmptyFilename,
+                    ))
+                    .attach("notify channel closed before CaptureFileCreationEnded"));
+                }
+            }
+        }
+    })
+    .await
+    {
+        Ok(Ok(0)) => eprintln!("{} capture file ready", ok_tag("ready")),
+        Ok(Ok(hr)) => {
+            return Err(rootcause::Report::new(Error::from(
+                xeedee::error::ArgumentError::EmptyFilename,
+            ))
+            .attach(format!(
+                "capture file creation failed on console, hresult {hr:#010x}"
+            )));
+        }
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(rootcause::Report::new(Error::from(
+                xeedee::error::ArgumentError::EmptyFilename,
+            ))
+            .attach(format!(
+                "no CaptureFileCreationEnded within {}s; is a title actually rendering D3D frames?",
+                FILE_READY_TIMEOUT.as_secs()
+            )));
+        }
+    }
 
     session.begin_capture().await?;
     eprintln!(
@@ -1811,58 +2071,126 @@ where
         }
     );
 
-    let stop_signal = async {
-        match duration {
-            Some(d) => {
-                tokio::time::sleep(d).await;
-            }
-            None => {
-                let stdin = tokio::io::BufReader::new(tokio::io::stdin());
-                use tokio::io::AsyncBufReadExt as _;
-                let mut lines = stdin.lines();
-                let _ = lines.next_line().await;
-            }
+    match duration {
+        Some(d) => tokio::time::sleep(d).await,
+        None => {
+            use tokio::io::AsyncBufReadExt as _;
+            let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+            let mut lines = stdin.lines();
+            let _ = lines.next_line().await;
         }
     };
-    stop_signal.await;
 
     session.end_capture().await?;
     session.end_capture_file_creation().await?;
-    session.disconnect().await?;
     eprintln!(
-        "{} capture wrapped up, downloading segments",
+        "{} capture closed, waiting for {{CaptureEnded}}",
+        ok_tag("stopping")
+    );
+
+    // Wait for the handler to signal the whole session is done so we
+    // know all segments have been flushed to disk.
+    let _ = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match notify_rx.recv().await {
+                Some(Notification::CaptureEnded) => break,
+                Some(_) => continue,
+                None => break,
+            }
+        }
+    })
+    .await;
+
+    session.disconnect().await?;
+    // Stop the notify task; we're about to do file I/O and don't
+    // need the notification reader anymore.
+    notify_task.abort();
+    // The PIX command socket is "dedicated" -- xbdm rejects normal
+    // file-ops on it (`dirlist` / `getfile` returns "dedicated
+    // connection required"). Drop it and open a fresh connection for
+    // the segment download phase.
+    drop(client);
+    let files_transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut client = xeedee::Client::new(files_transport).read_banner().await?;
+    eprintln!(
+        "{} capture finalised, downloading segments",
         ok_tag("done")
     );
 
-    // Poll the console for segments (xbmovie uses notifications; polling
-    // is fine for a v0 implementation). Segment file names follow the
-    // pattern `<base>N.<ext>`: we strip the final `.wmv` on the remote
-    // path and append `N.wmv` starting at 0.
-    let (base, ext) = match remote.rfind('.') {
-        Some(dot) => (&remote[..dot], &remote[dot..]),
-        None => (remote, ""),
-    };
-
-    let mut segments_downloaded: u32 = 0;
-    for index in 0u32..256 {
-        let segment_remote = format!("{base}{index}{ext}");
-        let attrs = client
-            .run(GetFileAttributes {
-                path: segment_remote.clone(),
-            })
-            .await;
-        let attrs = match attrs {
-            Ok(a) => a,
-            Err(_) => break,
-        };
-        if attrs.is_directory {
-            break;
+    // Find segment files. xbmovie's file naming is
+    // `<stem><N>.<ext>` where the remote path was `<stem>.<ext>`,
+    // starting at N=0. Rather than polling GetFileAttributes with
+    // the NT device path form (which doesn't always resolve back),
+    // list the parent directory in DOS form and match by basename
+    // stem -- this works regardless of how we sent the path to the
+    // PIX handler.
+    let (parent_dir_dos, stem, ext) = split_capture_remote(&remote);
+    eprintln!(
+        "{} scanning {parent_dir_dos} for segments (stem={stem:?}, ext={ext:?})",
+        ok_tag("looking"),
+    );
+    let entries = match client
+        .run(DirList {
+            path: parent_dir_dos.clone(),
+        })
+        .await
+    {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!(
+                "{} dirlist failed on {parent_dir_dos}: {:?}",
+                warn_tag("warn:"),
+                e.current_context()
+            );
+            vec![]
         }
-        let local_path = format!("{output_dir}/segment-{:03}.bin", index);
+    };
+    tracing::debug!(target: "xeedee::pix", entry_count = entries.len(), "dirlist returned");
+
+    let prefix = stem.clone();
+    let mut segments: Vec<(u32, String, u64)> = entries
+        .into_iter()
+        .filter(|e| !e.is_directory && e.name.starts_with(&prefix) && e.name.ends_with(&ext))
+        .filter_map(|e| {
+            // Extract the numeric index between stem and ext.
+            let mid = &e.name[prefix.len()..e.name.len() - ext.len()];
+            mid.parse::<u32>().ok().map(|idx| (idx, e.name, e.size))
+        })
+        .collect();
+    segments.sort_by_key(|(idx, _, _)| *idx);
+    if segments.is_empty() {
+        eprintln!(
+            "{} no files matching {stem}<N>{ext} in {parent_dir_dos}. \
+             Either the handler produced no output this run, or the \
+             previous segments have already been deleted.",
+            warn_tag("warn:"),
+        );
+    }
+
+    let total_segments = segments.len();
+    let mut segments_downloaded = 0u32;
+    let mut bytes_downloaded = 0u64;
+    let mut downloaded_local_paths: Vec<String> = Vec::new();
+    for (index, name, _size_hint) in segments {
+        let remote_path = format!("{parent_dir_dos}{name}");
+        let local_path = format!("{output_dir}/{name}");
         let download = client
-            .get_file(&segment_remote, GetFileRange::WholeFile)
+            .get_file(&remote_path, GetFileRange::WholeFile)
             .await?;
         let total = download.total();
+        if total == 0 {
+            eprintln!(
+                "{} segment {index}: empty, skipping",
+                warn_tag("skip:")
+            );
+            let _ = client
+                .run(xeedee::commands::Delete {
+                    path: remote_path,
+                    is_directory: false,
+                })
+                .await;
+            continue;
+        }
         let bar = ui.progress(total, &format!("segment {index}"));
         let file = tokio::fs::File::create(&local_path)
             .await
@@ -1871,27 +2199,647 @@ where
             .attach_with(|| format!("creating {local_path}"))?;
         let compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(file);
         let mut tracked = ProgressWrite::new(compat, bar.clone());
-        download.copy_into(&mut tracked).await?;
+        let copied = download.copy_into(&mut tracked).await?;
         bar.finish_and_clear();
         eprintln!(
-            "{} segment {index}: {total} bytes -> {local_path}",
+            "{} segment {index}: {copied} bytes -> {local_path}",
             ok_tag("saved")
         );
         let _ = client
             .run(xeedee::commands::Delete {
-                path: segment_remote,
+                path: remote_path,
                 is_directory: false,
             })
             .await;
         segments_downloaded += 1;
+        bytes_downloaded += copied;
+        downloaded_local_paths.push(local_path);
     }
 
     eprintln!(
-        "{} downloaded {segments_downloaded} segment{s}",
+        "{} downloaded {segments_downloaded}/{total_segments} segment{s} ({})",
         ok_tag("finished"),
-        s = if segments_downloaded == 1 { "" } else { "s" },
+        ui.fmt_bytes(bytes_downloaded),
+        s = if total_segments == 1 { "" } else { "s" },
     );
-    let _ = Notification::parse;
+
+    if no_conversion || downloaded_local_paths.is_empty() {
+        return Ok(());
+    }
+    match which_ffmpeg() {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!(
+                "{} skipping conversion: {}. Pass --no-conversion to silence.",
+                warn_tag("warn:"),
+                e.current_context()
+            );
+            return Ok(());
+        }
+    }
+
+    for xbm_path in &downloaded_local_paths {
+        let mp4_path = match xbm_path.strip_suffix(".xbm") {
+            Some(stem) => format!("{stem}.mp4"),
+            None => format!("{xbm_path}.mp4"),
+        };
+        eprintln!(
+            "{} encoding {xbm_path} -> {mp4_path}",
+            ok_tag("converting"),
+        );
+        match encode_xbm_to_mp4(xbm_path, &mp4_path, "frame", 0.0, 20, &[]).await {
+            Ok(()) => {
+                if let Err(e) = std::fs::remove_file(xbm_path) {
+                    eprintln!(
+                        "{} could not delete {xbm_path} after encode: {e}",
+                        warn_tag("warn:")
+                    );
+                } else {
+                    eprintln!("{} removed {xbm_path}", ok_tag("cleaned"));
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} conversion of {xbm_path} failed: {:?}; raw file retained",
+                    warn_tag("warn:"),
+                    e.current_context()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Split a capture remote path into (parent directory in DOS form
+/// ending in `\\`, stem, extension-with-dot).
+///
+/// Accepts both the NT device form
+/// (`\\Device\\Harddisk0\\Partition1\\DEVKIT\\foo.xbm`) and the DOS
+/// form (`DEVKIT:\\foo.xbm`), translating the former back to the
+/// latter for use with xbdm's file-ops. Assumes the path is under
+/// the `DEVKIT` drive on partition 1 when in NT form; any other
+/// layout should supply a DOS-form path directly.
+#[cfg(feature = "capture")]
+fn split_capture_remote(remote: &str) -> (String, String, String) {
+    let nt_prefix = r"\Device\Harddisk0\Partition1\";
+    let dos_form = if let Some(rest) = remote.strip_prefix(nt_prefix) {
+        // Rest looks like `DEVKIT\foo.xbm`; first `\` becomes `:\`.
+        match rest.find('\\') {
+            Some(slash) => format!("{}:\\{}", &rest[..slash], &rest[slash + 1..]),
+            None => format!("{rest}:\\"),
+        }
+    } else {
+        remote.to_owned()
+    };
+
+    let last_sep = dos_form.rfind('\\').unwrap_or(0);
+    let (parent, name) = dos_form.split_at(last_sep + 1);
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) => (&name[..dot], &name[dot..]),
+        None => (name, ""),
+    };
+    (parent.to_owned(), stem.to_owned(), ext.to_owned())
+}
+
+#[cfg(feature = "capture")]
+async fn run_xbm(cmd: &XbmCommand) -> Result<(), rootcause::Report<Error>> {
+    use xeedee::commands::pix::FrameCursor;
+    use xeedee::commands::pix::XbmHeader;
+
+    match cmd {
+        XbmCommand::Info { file } => {
+            let mut f = std::fs::File::open(file)
+                .map_err(Error::from)
+                .into_report()
+                .attach_with(|| format!("opening xbm file {file}"))?;
+            let header = XbmHeader::read(&mut f)?;
+            println!(
+                "magic        {:?} ({:#010x})  version {:#010x}  header_size {:#x}",
+                header.variant, header.variant.as_u32(), header.version, header.header_size
+            );
+            println!(
+                "frame        {}x{}  aligned {}x{}  (this drives pixel stride)",
+                header.frame_width,
+                header.frame_height,
+                header.aligned_frame_width(),
+                header.aligned_frame_height(),
+            );
+            println!(
+                "source       {}x{}  display {}x{}",
+                header.source_width,
+                header.source_height,
+                header.display_width,
+                header.display_height,
+            );
+            println!(
+                "tick rate    {} ticks/s  yuv bytes/frame {}",
+                header.timestamp_rate,
+                header.frame_pixel_bytes(),
+            );
+
+            let mut cursor = FrameCursor::new(&mut f)?;
+            let mut frame_count = 0u64;
+            let mut audio_bytes = 0u64;
+            let mut first_ts: Option<u32> = None;
+            let mut last_ts: Option<u32> = None;
+            let mut first_record_size: Option<u64> = None;
+            let mut frame_magic: Option<u32> = None;
+            while let Some(fr) = cursor.next_frame(&header)? {
+                frame_count += 1;
+                audio_bytes += fr.header.audio_bytes() as u64;
+                first_ts.get_or_insert(fr.header.timestamp);
+                last_ts = Some(fr.header.timestamp);
+                first_record_size.get_or_insert(fr.record_size);
+                frame_magic.get_or_insert(fr.header.frame_magic);
+            }
+            println!("frames       {frame_count}");
+            if let Some(m) = frame_magic {
+                println!("frame magic  {m:#010x}");
+            }
+            if let (Some(a), Some(b)) = (first_ts, last_ts) {
+                let span = b.wrapping_sub(a);
+                let seconds = span as f64 / header.timestamp_rate as f64;
+                let fps = if seconds > 0.0 {
+                    (frame_count.saturating_sub(1)) as f64 / seconds
+                } else {
+                    0.0
+                };
+                println!(
+                    "timestamps   {a} -> {b} (span {span}, {seconds:.3}s, {fps:.2} fps)"
+                );
+            }
+            println!("audio bytes  {audio_bytes}");
+            if let Some(sz) = first_record_size {
+                println!("first record {sz} bytes");
+            }
+            Ok(())
+        }
+        XbmCommand::Extract {
+            file,
+            output_dir,
+            concat,
+            raw,
+        } => run_xbm_extract(file, output_dir, *concat, *raw).await,
+        XbmCommand::Encode {
+            file,
+            output,
+            crop,
+            fps,
+            crf,
+            ffmpeg_args,
+        } => run_xbm_encode(file, output, crop, *fps, *crf, ffmpeg_args).await,
+    }
+}
+
+#[cfg(feature = "capture")]
+async fn run_xbm_extract(
+    file: &str,
+    output_dir: &str,
+    concat: bool,
+    raw: bool,
+) -> Result<(), rootcause::Report<Error>> {
+    use std::io::Read;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    use std::io::Write;
+    use xeedee::commands::pix::detile_frame;
+    use xeedee::commands::pix::FrameCursor;
+    use xeedee::commands::pix::XbmHeader;
+
+    std::fs::create_dir_all(output_dir)
+        .map_err(Error::from)
+        .into_report()
+        .attach_with(|| format!("creating {output_dir}"))?;
+    let mut f = std::fs::File::open(file)
+        .map_err(Error::from)
+        .into_report()
+        .attach_with(|| format!("opening xbm file {file}"))?;
+    let header = XbmHeader::read(&mut f)?;
+    let pixel_bytes = header.frame_pixel_bytes() as usize;
+
+    let ext = if raw { "tiled" } else { "nv12" };
+    let mut concat_writer = if concat {
+        let path = format!("{output_dir}/frames.{ext}");
+        Some((
+            std::fs::File::create(&path)
+                .map_err(Error::from)
+                .into_report()
+                .attach_with(|| format!("creating {path}"))?,
+            path,
+        ))
+    } else {
+        None
+    };
+
+    let mut cursor = FrameCursor::new(&mut f)?;
+    let mut records: Vec<_> = Vec::new();
+    while let Some(fr) = cursor.next_frame(&header)? {
+        records.push(fr);
+    }
+
+    let mut tiled = vec![0u8; pixel_bytes];
+    let mut nv12 = vec![0u8; pixel_bytes];
+    let mut index = 0u32;
+    let mut timestamps: Vec<u32> = Vec::with_capacity(records.len());
+    for fr in &records {
+        f.seek(SeekFrom::Start(fr.pixels_offset))
+            .map_err(Error::from)
+            .into_report()
+            .attach_with(|| format!("seek to pixels at {:#x}", fr.pixels_offset))?;
+        f.read_exact(&mut tiled)
+            .map_err(Error::from)
+            .into_report()
+            .attach_with(|| format!("reading pixel bytes at {:#x}", fr.pixels_offset))?;
+        timestamps.push(fr.header.timestamp);
+
+        let payload: &[u8] = if raw {
+            &tiled
+        } else {
+            detile_frame(&tiled, &mut nv12, &header);
+            &nv12
+        };
+
+        let out_path = format!("{output_dir}/frame-{:05}.{ext}", index);
+        std::fs::write(&out_path, payload)
+            .map_err(Error::from)
+            .into_report()
+            .attach_with(|| format!("writing {out_path}"))?;
+        if let Some((w, _)) = concat_writer.as_mut() {
+            w.write_all(payload)
+                .map_err(Error::from)
+                .into_report()
+                .attach("appending to concat")?;
+        }
+        index += 1;
+    }
+
+    let meta_path = format!("{output_dir}/metadata.txt");
+    let fps = if timestamps.len() >= 2 {
+        let span = timestamps.last().unwrap().wrapping_sub(*timestamps.first().unwrap());
+        if span > 0 {
+            (timestamps.len() - 1) as f64 * header.timestamp_rate as f64 / span as f64
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let layout = if raw {
+        "tiled Xbox 360 16-wide-column NV12 (raw on-device layout)"
+    } else {
+        "nv12 (Y plane, then interleaved UV plane; detiled from on-device layout)"
+    };
+    let ffmpeg_pixfmt = if raw { "nv12  # WILL NOT RENDER -- re-run without --raw" } else { "nv12" };
+    let meta = format!(
+        "# xbmovie .xbm frame dump\n\
+         source: {file}\n\
+         magic: {:?}\n\
+         frame_width: {}\n\
+         frame_height: {}\n\
+         aligned_width: {}\n\
+         aligned_height: {}\n\
+         visible_crop: {}x{}\n\
+         pixel_format: {layout}\n\
+         frame_count: {}\n\
+         approx_fps: {fps:.3}\n\
+         \n\
+         # Reconstruct (crops off the 32-alignment padding):\n\
+         # ffmpeg -f rawvideo -pix_fmt {ffmpeg_pixfmt} -s {}x{} -r {} \\\n\
+         #   -i frames.{ext} -vf crop={}:{}:0:0 \\\n\
+         #   -c:v libx264 -pix_fmt yuv420p out.mp4\n",
+        header.variant,
+        header.frame_width,
+        header.frame_height,
+        header.aligned_frame_width(),
+        header.aligned_frame_height(),
+        header.source_width,
+        header.source_height,
+        records.len(),
+        header.aligned_frame_width(),
+        header.aligned_frame_height(),
+        fps.round() as u32,
+        header.frame_width,
+        header.frame_height,
+    );
+    std::fs::write(&meta_path, meta)
+        .map_err(Error::from)
+        .into_report()
+        .attach("writing metadata")?;
+
+    eprintln!(
+        "{} extracted {} frame{s} ({} pixel bytes each) -> {output_dir}",
+        ok_tag("done"),
+        index,
+        humanize_bytes(pixel_bytes as u64),
+        s = if index == 1 { "" } else { "s" },
+    );
+    if let Some((_, p)) = concat_writer {
+        eprintln!("{} concatenated stream -> {p}", ok_tag("done"));
+    }
+    eprintln!("{} metadata -> {meta_path}", ok_tag("done"));
+    Ok(())
+}
+
+#[cfg(feature = "capture")]
+async fn run_xbm_encode(
+    file: &str,
+    output: &str,
+    crop_mode: &str,
+    fps_override: f64,
+    crf: u32,
+    extra_args: &[String],
+) -> Result<(), rootcause::Report<Error>> {
+    // Probe ffmpeg before we do any work so the user gets an
+    // immediate, typed failure rather than something mid-pipeline.
+    which_ffmpeg()?;
+    encode_xbm_to_mp4(file, output, crop_mode, fps_override, crf, extra_args).await
+}
+
+/// Shared implementation used by both the `xbm encode` subcommand
+/// and the auto-conversion tail of `capture`. Assumes `ffmpeg` is on
+/// `$PATH`; callers should invoke [`which_ffmpeg`] first.
+#[cfg(feature = "capture")]
+async fn encode_xbm_to_mp4(
+    file: &str,
+    output: &str,
+    crop_mode: &str,
+    fps_override: f64,
+    crf: u32,
+    extra_args: &[String],
+) -> Result<(), rootcause::Report<Error>> {
+    use std::io::Read;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+    use xeedee::commands::pix::detile_frame;
+    use xeedee::commands::pix::FrameCursor;
+    use xeedee::commands::pix::XbmHeader;
+
+    let mut f = std::fs::File::open(file)
+        .map_err(Error::from)
+        .into_report()
+        .attach_with(|| format!("opening xbm file {file}"))?;
+    let header = XbmHeader::read(&mut f)?;
+    let aligned_w = header.aligned_frame_width();
+    let aligned_h = header.aligned_frame_height();
+    let pixel_bytes = header.frame_pixel_bytes() as usize;
+
+    let (crop_w, crop_h) = match crop_mode {
+        "frame" => (header.frame_width, header.frame_height),
+        "source" => (header.source_width, header.source_height),
+        "none" => (aligned_w, aligned_h),
+        other => {
+            return Err(rootcause::Report::new(Error::from(
+                xeedee::error::ArgumentError::EmptyFilename,
+            ))
+            .attach(format!(
+                "--crop must be one of `frame`, `source`, `none`; got {other:?}"
+            )));
+        }
+    };
+
+    // Walk the frame table once to derive timestamps + fps, then
+    // rewind for the streaming pass.
+    let mut cursor = FrameCursor::new(&mut f)?;
+    let mut records = Vec::new();
+    while let Some(fr) = cursor.next_frame(&header)? {
+        records.push(fr);
+    }
+    if records.is_empty() {
+        return Err(rootcause::Report::new(Error::from(
+            xeedee::error::ArgumentError::EmptyFilename,
+        ))
+        .attach("xbm contains no frame records"));
+    }
+    let derived_fps = if records.len() >= 2 {
+        let span = records
+            .last()
+            .unwrap()
+            .header
+            .timestamp
+            .wrapping_sub(records.first().unwrap().header.timestamp);
+        if span > 0 {
+            (records.len() - 1) as f64 * header.timestamp_rate as f64 / span as f64
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let fps = if fps_override > 0.0 {
+        fps_override
+    } else if derived_fps > 0.0 {
+        derived_fps
+    } else {
+        30.0
+    };
+
+    // Build the ffmpeg command. Input is rawvideo NV12 over stdin.
+    let size = format!("{aligned_w}x{aligned_h}");
+    let framerate = format!("{fps:.3}");
+    let crop_filter = format!("crop={crop_w}:{crop_h}:0:0");
+    let crf_str = crf.to_string();
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-stats")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("nv12")
+        .arg("-s")
+        .arg(&size)
+        .arg("-framerate")
+        .arg(&framerate)
+        .arg("-i")
+        .arg("-")
+        .arg("-vf")
+        .arg(&crop_filter)
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-crf")
+        .arg(&crf_str)
+        .arg("-pix_fmt")
+        .arg("yuv420p");
+    for extra in extra_args {
+        cmd.arg(extra);
+    }
+    cmd.arg("-y").arg(output).stdin(Stdio::piped());
+
+    eprintln!(
+        "{} encoding {} frames at {aligned_w}x{aligned_h} -> {crop_w}x{crop_h} @ {fps:.2} fps -> {output}",
+        ok_tag("encoding"),
+        records.len()
+    );
+
+    let mut child = cmd
+        .spawn()
+        .map_err(Error::from)
+        .into_report()
+        .attach("spawning ffmpeg")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("stdin configured as piped");
+
+    let mut tiled = vec![0u8; pixel_bytes];
+    let mut nv12 = vec![0u8; pixel_bytes];
+    for fr in &records {
+        f.seek(SeekFrom::Start(fr.pixels_offset))
+            .map_err(Error::from)
+            .into_report()
+            .attach_with(|| format!("seek to pixels at {:#x}", fr.pixels_offset))?;
+        f.read_exact(&mut tiled)
+            .map_err(Error::from)
+            .into_report()
+            .attach_with(|| format!("reading pixels at {:#x}", fr.pixels_offset))?;
+        detile_frame(&tiled, &mut nv12, &header);
+        if stdin.write_all(&nv12).is_err() {
+            // ffmpeg died; break out and let the exit-status branch
+            // explain why.
+            break;
+        }
+    }
+    drop(stdin);
+    let status = child
+        .wait()
+        .map_err(Error::from)
+        .into_report()
+        .attach("waiting on ffmpeg")?;
+    if !status.success() {
+        return Err(rootcause::Report::new(Error::from(
+            xeedee::error::ArgumentError::EmptyFilename,
+        ))
+        .attach(format!("ffmpeg exited with {status}")));
+    }
+    eprintln!("{} wrote {output}", ok_tag("done"));
+    Ok(())
+}
+
+/// Error out cleanly if `ffmpeg` isn't on $PATH. Used by
+/// `xbm encode` as an early precondition check.
+#[cfg(feature = "capture")]
+fn which_ffmpeg() -> Result<(), rootcause::Report<Error>> {
+    use std::process::Command;
+    use std::process::Stdio;
+    let ok = Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok();
+    if ok {
+        Ok(())
+    } else {
+        Err(rootcause::Report::new(Error::from(
+            xeedee::error::ArgumentError::EmptyFilename,
+        ))
+        .attach(
+            "ffmpeg not found on $PATH. Install it (`nix-shell -p ffmpeg`, \
+             `brew install ffmpeg`, etc.) and retry. The `xbm encode` \
+             subcommand streams decoded NV12 frames to ffmpeg's stdin.",
+        ))
+    }
+}
+
+#[cfg(feature = "capture")]
+async fn run_pix_notify(
+    target: &Target,
+    conn_timeout: Duration,
+    duration_secs: u64,
+    log_path: Option<String>,
+) -> Result<(), rootcause::Report<Error>> {
+    use futures_util::io::AsyncBufReadExt as _;
+    use futures_util::io::BufReader;
+    use std::io::Write as _;
+
+    let transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut client = xeedee::Client::new(transport).read_banner().await?;
+
+    // `notify` turns the current connection into a pure notification
+    // channel after xbdm acknowledges with a single response line;
+    // subsequent reads get async events at the server's discretion.
+    let ack = client.send_raw("notify").await?;
+    eprintln!(
+        "{} {ack:?}; {}",
+        ok_tag("subscribed"),
+        if duration_secs == 0 {
+            "Ctrl-C to stop".to_owned()
+        } else {
+            format!("stopping in {duration_secs}s")
+        }
+    );
+
+    let mut log_file = match log_path.as_deref() {
+        Some(p) => Some(
+            std::fs::File::create(p)
+                .map_err(Error::from)
+                .into_report()
+                .attach_with(|| format!("creating notify log {p}"))?,
+        ),
+        None => None,
+    };
+
+    let mut transport = client.into_inner();
+    let mut reader = BufReader::new(&mut transport);
+    let mut line = String::new();
+
+    let deadline = if duration_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(duration_secs))
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        line.clear();
+        let read = async { reader.read_line(&mut line).await };
+        let remaining = deadline.map(|d| d.saturating_sub(start.elapsed()));
+        let result = match remaining {
+            Some(Duration::ZERO) => break,
+            Some(r) => match tokio::time::timeout(r, read).await {
+                Ok(r) => r,
+                Err(_) => break,
+            },
+            None => read.await,
+        };
+        match result {
+            Ok(0) => {
+                eprintln!("{} notification channel closed", warn_tag("eof:"));
+                break;
+            }
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let ts = start.elapsed().as_millis();
+                let tag = match Notification::parse(trimmed) {
+                    Some(Notification::CaptureFileCreationEnded { .. }) => "cap-seg",
+                    Some(Notification::CaptureEnded) => "cap-end",
+                    Some(Notification::MovieData(_)) => "movie",
+                    Some(Notification::Resource(_)) => "rsrc",
+                    Some(Notification::VideoOp { error: true, .. }) => "verr",
+                    Some(Notification::VideoOp { error: false, .. }) => "vop",
+                    Some(Notification::Status(_)) => "stat",
+                    Some(Notification::Other(_)) => "pix?",
+                    None => "line",
+                };
+                let rendered = format!("{ts:>6}ms [{tag}] {trimmed}");
+                eprintln!("{rendered}");
+                if let Some(f) = log_file.as_mut() {
+                    let _ = writeln!(f, "{rendered}");
+                }
+            }
+            Err(e) => {
+                return Err(rootcause::Report::new(Error::from(e)));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1962,14 +2910,15 @@ fn colors_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::IsTerminal::is_terminal(&std::io::stderr())
 }
 
-/// Emit a line of output alongside an active progress bar/spinner
-/// without the two clobbering each other. When a bar is present we
-/// delegate to `ProgressBar::println`, which redraws itself after each
-/// printed line; otherwise we fall through to plain `println!`.
+/// Emit a line on **stdout** alongside an active progress bar/spinner
+/// without the two clobbering each other. `ProgressBar::println` would
+/// route through the bar's draw target (stderr); we want tree output
+/// to be pipeable, so we use `suspend` to temporarily clear the bar,
+/// `println!` to real stdout, then let the bar redraw itself.
 fn tree_println(bar: Option<&ProgressBar>, line: impl AsRef<str>) {
     let line = line.as_ref();
     match bar {
-        Some(bar) if !bar.is_hidden() => bar.println(line),
+        Some(bar) if !bar.is_hidden() => bar.suspend(|| println!("{line}")),
         _ => println!("{line}"),
     }
 }
@@ -2302,4 +3251,36 @@ fn write_capture(
         .attach_with(|| format!("writing capture to {}", path.display()))?;
     eprintln!("capture written to {}", path.display());
     Ok(())
+}
+
+
+#[cfg(all(test, feature = "capture"))]
+mod capture_tests {
+    use super::split_capture_remote;
+
+    #[test]
+    fn splits_nt_device_path() {
+        let (parent, stem, ext) =
+            split_capture_remote(r"\Device\Harddisk0\Partition1\DEVKIT\foo.xbm");
+        assert_eq!(parent, r"DEVKIT:\");
+        assert_eq!(stem, "foo");
+        assert_eq!(ext, ".xbm");
+    }
+
+    #[test]
+    fn splits_dos_path_unchanged() {
+        let (parent, stem, ext) = split_capture_remote(r"DEVKIT:\bar.xbm");
+        assert_eq!(parent, r"DEVKIT:\");
+        assert_eq!(stem, "bar");
+        assert_eq!(ext, ".xbm");
+    }
+
+    #[test]
+    fn splits_nt_nested() {
+        let (parent, stem, ext) =
+            split_capture_remote(r"\Device\Harddisk0\Partition1\DEVKIT\sub\baz.xbm");
+        assert_eq!(parent, r"DEVKIT:\sub\");
+        assert_eq!(stem, "baz");
+        assert_eq!(ext, ".xbm");
+    }
 }

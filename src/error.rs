@@ -28,6 +28,10 @@ pub enum Error {
     #[error(transparent)]
     Pix(#[from] crate::commands::pix::PixError),
 
+    #[cfg(feature = "capture")]
+    #[error(transparent)]
+    Xbm(#[from] crate::commands::pix::XbmError),
+
     #[cfg(feature = "dangerous")]
     #[error(transparent)]
     Drivemap(#[from] crate::commands::dangerous::drivemap::DrivemapError),
