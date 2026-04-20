@@ -3,6 +3,8 @@
 //! Each submodule groups a family of commands. The modules only depend on
 //! [`crate::protocol`] and [`crate::error`]; they never touch I/O directly.
 
+#[cfg(feature = "dangerous")]
+pub mod dangerous;
 pub mod debug;
 pub mod file;
 pub mod fs;

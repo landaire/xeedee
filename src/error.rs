@@ -24,6 +24,14 @@ pub enum Error {
     #[error(transparent)]
     Transport(#[from] TransportError),
 
+    #[cfg(feature = "dangerous")]
+    #[error(transparent)]
+    Drivemap(#[from] crate::commands::dangerous::drivemap::DrivemapError),
+
+    #[cfg(feature = "dangerous")]
+    #[error(transparent)]
+    Pe(#[from] crate::commands::dangerous::pe::PeError),
+
     #[error("remote reported error {code} ({message:?})")]
     Remote { code: ErrorCode, message: String },
 

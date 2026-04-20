@@ -55,6 +55,8 @@ use xeedee::commands::Threads;
 use xeedee::commands::Title;
 use xeedee::commands::WalkMem;
 use xeedee::commands::XbeInfo;
+#[cfg(feature = "dangerous")]
+use xeedee::commands::dangerous::drivemap as dm;
 use xeedee::error::Error;
 use xeedee::transport::CaptureLog;
 use xeedee::transport::RecordingTransport;
@@ -411,6 +413,28 @@ enum Command {
         /// The command line to send (no trailing CRLF).
         line: String,
     },
+
+    /// Dangerous, low-level operations that write into xbdm's memory
+    /// image. Each subcommand is gated behind the `dangerous` feature
+    /// and documented with what it touches.
+    #[cfg(feature = "dangerous")]
+    #[command(subcommand)]
+    Dangerous(DangerousCommand),
+}
+
+#[cfg(feature = "dangerous")]
+#[derive(Subcommand, Debug)]
+enum DangerousCommand {
+    /// Enable `drivemap internal=1` for this session by calling xbdm's
+    /// own symlink-setup routine via a one-shot command-table swap. No
+    /// flash writes; the effect lasts until reboot.
+    DrivemapEnable,
+    /// Report current state of the drivemap flag + visible drives.
+    DrivemapStatus,
+    /// Write `[xbdm]\r\ndrivemap internal=1\r\n` to `FLASH:\recint.ini`
+    /// so the setting survives reboots. Requires `drivemap-enable` to
+    /// have been run already so `FLASH:` is mounted.
+    DrivemapPersist,
 }
 
 fn main() -> ExitCode {
@@ -537,9 +561,21 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
             .attach("--host is required for this subcommand")
     })?;
     let target = Target::parse(host, cli.port);
+    let conn_timeout = Duration::from_secs(cli.timeout);
     tracing::info!(target: "xeedee", console = %target, "connecting");
 
-    let transport = connect_target_timeout(&target, Duration::from_secs(cli.timeout)).await?;
+    // drivemap-enable needs two independent connections (the first one
+    // will be abandoned with a hung read), so it bypasses the usual
+    // single-client flow and is not recorded under --capture.
+    #[cfg(feature = "dangerous")]
+    if matches!(
+        &cli.cmd,
+        Command::Dangerous(DangerousCommand::DrivemapEnable)
+    ) {
+        return run_drivemap_enable(&target, conn_timeout).await;
+    }
+
+    let transport = connect_target_timeout(&target, conn_timeout).await?;
 
     if let Some(path) = cli.capture.clone() {
         let recording = RecordingTransport::new(transport);
@@ -553,6 +589,37 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
         let client = Client::new(transport).read_banner().await?;
         drive_connected(client, cli.cmd, ui).await
     }
+}
+
+#[cfg(feature = "dangerous")]
+async fn run_drivemap_enable(
+    target: &Target,
+    conn_timeout: Duration,
+) -> Result<(), rootcause::Report<Error>> {
+    let hijack_transport = connect_target_timeout(target, conn_timeout).await?;
+    let hijack = Client::new(hijack_transport).read_banner().await?;
+
+    let target_for_reconnect = target.clone();
+    let reconnect = move || {
+        let target = target_for_reconnect.clone();
+        async move {
+            let t = connect_target_timeout(&target, conn_timeout).await?;
+            let c = Client::new(t).read_banner().await?;
+            Ok::<_, rootcause::Report<Error>>(c)
+        }
+    };
+
+    let report = dm::enable(hijack, reconnect, Duration::from_secs(3)).await?;
+    eprintln!(
+        "{} drivemap internal enabled. drives went from {} -> {} entries.",
+        ok_tag("done"),
+        report.drives_before.len(),
+        report.drives_after.len()
+    );
+    for drive in &report.drives_after {
+        println!("{drive}");
+    }
+    Ok(())
 }
 
 trait RecordingExt<T> {
@@ -1287,6 +1354,33 @@ where
             let resp = client.send_raw(&line).await?;
             println!("{resp:#?}");
         }
+        #[cfg(feature = "dangerous")]
+        Command::Dangerous(cmd) => match cmd {
+            DangerousCommand::DrivemapStatus => {
+                let status = dm::status(&mut client).await?;
+                println!(
+                    "xbdm @ {:#010x}, drivemap_fn @ {:#010x}, flag @ {:#010x} = {:#010x}, altaddr entry @ {:#010x}",
+                    status.layout.module.base,
+                    status.layout.drivemap_fn,
+                    status.layout.flag_global,
+                    status.flag_value,
+                    status.layout.altaddr_entry.name_ptr_addr
+                );
+                println!("visible drives: {:?}", status.visible_drives);
+            }
+            DangerousCommand::DrivemapEnable => unreachable!(
+                "DrivemapEnable is handled by run_drivemap_enable before drive_connected"
+            ),
+            DangerousCommand::DrivemapPersist => {
+                let report = dm::persist(&mut client).await?;
+                eprintln!(
+                    "{} wrote {} bytes to {}",
+                    ok_tag("persisted"),
+                    report.bytes_written,
+                    report.path
+                );
+            }
+        },
     }
 
     let _ = client.bye().await;
