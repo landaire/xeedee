@@ -253,17 +253,26 @@ enum Command {
     /// Rename / move a remote path.
     Mv { from: String, to: String },
 
-    /// Download a file from the console.
+    /// Download a file (or, with `-r`, a directory tree) from the console.
     Get {
         /// Remote path to download.
         remote: String,
-        /// Local file to write to, or `-` for stdout.
-        #[arg(short, long, default_value = "-")]
-        output: String,
-        /// Optional start offset.
+        /// Local destination. For a file, defaults to the remote's
+        /// basename in the current directory; if this names an existing
+        /// directory the file is written inside it. For a recursive
+        /// download, defaults to a new directory named after the
+        /// remote's basename in the current directory.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Recursively download a directory tree, mirroring it under
+        /// the local destination.
+        #[arg(short, long)]
+        recursive: bool,
+        /// Optional start offset. File mode only.
         #[arg(long)]
         offset: Option<u64>,
-        /// Optional byte count (required if `--offset` is set).
+        /// Optional byte count (required if `--offset` is set). File
+        /// mode only.
         #[arg(long)]
         size: Option<u64>,
     },
@@ -462,6 +471,15 @@ enum DangerousCommand {
     /// so the setting survives reboots. Requires `drivemap-enable` to
     /// have been run already so `FLASH:` is mounted.
     DrivemapPersist,
+    /// Dump the raw NAND flash image by `getfile`-ing `FLASH:\`. Makes
+    /// sure the internal drivemap is enabled first (running the enable
+    /// flow if it isn't already).
+    NandDump {
+        /// Local file to write. Defaults to `nand.bin` in the current
+        /// directory.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -591,15 +609,19 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
     let conn_timeout = Duration::from_secs(cli.timeout);
     tracing::info!(target: "xeedee", console = %target, "connecting");
 
-    // drivemap-enable needs two independent connections (the first one
-    // will be abandoned with a hung read), so it bypasses the usual
-    // single-client flow and is not recorded under --capture.
+    // drivemap-enable and nand-dump each need to open their own
+    // connection(s) (enable abandons one with a hung read; nand-dump
+    // may run enable internally first), so they bypass the shared
+    // single-client flow and are not recorded under --capture.
     #[cfg(feature = "dangerous")]
-    if matches!(
-        &cli.cmd,
-        Command::Dangerous(DangerousCommand::DrivemapEnable)
-    ) {
-        return run_drivemap_enable(&target, conn_timeout).await;
+    match &cli.cmd {
+        Command::Dangerous(DangerousCommand::DrivemapEnable) => {
+            return run_drivemap_enable(&target, conn_timeout).await;
+        }
+        Command::Dangerous(DangerousCommand::NandDump { output }) => {
+            return run_nand_dump(&target, conn_timeout, output.clone(), ui).await;
+        }
+        _ => {}
     }
 
     let transport = connect_target_timeout(&target, conn_timeout).await?;
@@ -659,6 +681,77 @@ async fn run_drivemap_enable(
     for drive in &report.drives_after {
         println!("{drive}");
     }
+    Ok(())
+}
+
+#[cfg(feature = "dangerous")]
+async fn run_nand_dump(
+    target: &Target,
+    conn_timeout: Duration,
+    output: Option<String>,
+    ui: UiCtx,
+) -> Result<(), rootcause::Report<Error>> {
+    let output_path = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("nand.bin"));
+
+    // Quick probe: if FLASH is already in the drivelist we can skip the
+    // hijack entirely. Saves the full .text/.rdata/.data readback that
+    // dm::discover does.
+    let probe_transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut probe = Client::new(probe_transport).read_banner().await?;
+    let drives = probe.run(DriveList).await.unwrap_or_default();
+    let flash_visible = drives.iter().any(|d| d.eq_ignore_ascii_case("flash"));
+    let _ = probe.bye().await;
+
+    if !flash_visible {
+        eprintln!(
+            "{} FLASH: not mounted; running drivemap-enable first",
+            warn_tag("note:")
+        );
+        let hijack_transport = connect_target_timeout(target, conn_timeout).await?;
+        let hijack = Client::new(hijack_transport).read_banner().await?;
+        let target_for_reconnect = target.clone();
+        let reconnect = move || {
+            let target = target_for_reconnect.clone();
+            async move {
+                let t = connect_target_timeout(&target, conn_timeout).await?;
+                let c = Client::new(t).read_banner().await?;
+                Ok::<_, rootcause::Report<Error>>(c)
+            }
+        };
+        let report = dm::enable(hijack, reconnect, Duration::from_secs(3)).await?;
+        if !report
+            .drives_after
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case("flash"))
+        {
+            return Err(rootcause::Report::new(Error::from(
+                xeedee::error::ArgumentError::EmptyFilename,
+            ))
+            .attach("drivemap-enable completed but FLASH: is still not mounted"));
+        }
+    }
+
+    let dl_transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut dl_client = Client::new(dl_transport).read_banner().await?;
+    // Bypass the stat-based directory check -- xbdm serves the raw
+    // NAND image when `FLASH:\` is getfile'd even though stat reports
+    // it as a directory.
+    let (copied, total) = download_single_file(
+        &mut dl_client,
+        "FLASH:\\",
+        &output_path,
+        GetFileRange::WholeFile,
+        ui,
+    )
+    .await?;
+    eprintln!(
+        "{} NAND dump: {copied} bytes ({total} declared) to {}",
+        ok_tag("done"),
+        output_path.display()
+    );
+    let _ = dl_client.bye().await;
     Ok(())
 }
 
@@ -876,45 +969,67 @@ where
         Command::Get {
             remote,
             output,
+            recursive,
             offset,
             size,
         } => {
-            let range = match (offset, size) {
-                (Some(offset), Some(size)) => GetFileRange::Range { offset, size },
-                (None, None) => GetFileRange::WholeFile,
-                _ => {
+            let attrs = client
+                .run(GetFileAttributes {
+                    path: remote.clone(),
+                })
+                .await
+                .ok();
+            let is_directory = attrs.as_ref().map(|a| a.is_directory).unwrap_or(false);
+
+            if is_directory {
+                if !recursive {
                     return Err(rootcause::Report::new(Error::from(
                         xeedee::error::ArgumentError::EmptyFilename,
                     ))
-                    .attach("--offset and --size must be provided together"));
+                    .attach(format!(
+                        "{remote:?} is a directory; pass -r for recursive download"
+                    )));
                 }
-            };
-            let download = client.get_file(&remote, range).await?;
-            let total = download.total();
-            let bar = ui.progress(total, "download");
-            if output == "-" {
-                let stdout = tokio::io::stdout();
-                let compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(stdout);
-                let mut tracked = ProgressWrite::new(compat, bar.clone());
-                let copied = download.copy_into(&mut tracked).await?;
-                bar.finish_and_clear();
-                eprintln!(
-                    "{} {copied} bytes ({total} declared) to stdout",
-                    ok_tag("downloaded")
-                );
-            } else {
-                let file = tokio::fs::File::create(&output)
+                if offset.is_some() || size.is_some() {
+                    return Err(rootcause::Report::new(Error::from(
+                        xeedee::error::ArgumentError::EmptyFilename,
+                    ))
+                    .attach("--offset / --size are file-mode only, not valid with -r"));
+                }
+                let root = resolve_get_dir_output(&remote, output.as_deref())?;
+                tokio::fs::create_dir_all(&root)
                     .await
                     .map_err(Error::from)
                     .into_report()
-                    .attach_with(|| format!("creating local file {output}"))?;
-                let compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(file);
-                let mut tracked = ProgressWrite::new(compat, bar.clone());
-                let copied = download.copy_into(&mut tracked).await?;
-                bar.finish_and_clear();
+                    .attach_with(|| format!("creating local directory {}", root.display()))?;
+                let mut stats = RecursiveGetStats::default();
+                download_dir_recursive(&mut client, &remote, &root, ui, &mut stats).await?;
                 eprintln!(
-                    "{} {copied} bytes ({total} declared) to {output}",
-                    ok_tag("downloaded")
+                    "{} {} file{} ({} total) under {}",
+                    ok_tag("downloaded"),
+                    stats.files,
+                    if stats.files == 1 { "" } else { "s" },
+                    ui.fmt_bytes(stats.bytes),
+                    root.display()
+                );
+            } else {
+                let range = match (offset, size) {
+                    (Some(offset), Some(size)) => GetFileRange::Range { offset, size },
+                    (None, None) => GetFileRange::WholeFile,
+                    _ => {
+                        return Err(rootcause::Report::new(Error::from(
+                            xeedee::error::ArgumentError::EmptyFilename,
+                        ))
+                        .attach("--offset and --size must be provided together"));
+                    }
+                };
+                let output_path = resolve_get_output(&remote, output.as_deref())?;
+                let (copied, total) =
+                    download_single_file(&mut client, &remote, &output_path, range, ui).await?;
+                eprintln!(
+                    "{} {copied} bytes ({total} declared) to {}",
+                    ok_tag("downloaded"),
+                    output_path.display()
                 );
             }
         }
@@ -1428,6 +1543,9 @@ where
             DangerousCommand::DrivemapEnable => unreachable!(
                 "DrivemapEnable is handled by run_drivemap_enable before drive_connected"
             ),
+            DangerousCommand::NandDump { .. } => {
+                unreachable!("NandDump is handled by run_nand_dump before drive_connected")
+            }
             DangerousCommand::DrivemapPersist => {
                 let report = dm::persist(&mut client).await?;
                 eprintln!(
@@ -1442,6 +1560,134 @@ where
 
     let _ = client.bye().await;
     Ok(())
+}
+
+#[derive(Default)]
+struct RecursiveGetStats {
+    files: u64,
+    bytes: u64,
+}
+
+async fn download_single_file<T>(
+    client: &mut Client<T, xeedee::Connected>,
+    remote: &str,
+    output_path: &std::path::Path,
+    range: GetFileRange,
+    ui: UiCtx,
+) -> Result<(u64, u64), rootcause::Report<Error>>
+where
+    T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
+{
+    let download = client.get_file(remote, range).await?;
+    let total = download.total();
+    let bar = ui.progress(total, "download");
+    let file = tokio::fs::File::create(output_path)
+        .await
+        .map_err(Error::from)
+        .into_report()
+        .attach_with(|| format!("creating local file {}", output_path.display()))?;
+    let compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(file);
+    let mut tracked = ProgressWrite::new(compat, bar.clone());
+    let copied = download.copy_into(&mut tracked).await?;
+    bar.finish_and_clear();
+    Ok((copied, total))
+}
+
+async fn download_dir_recursive<T>(
+    client: &mut Client<T, xeedee::Connected>,
+    remote_dir: &str,
+    local_root: &std::path::Path,
+    ui: UiCtx,
+    stats: &mut RecursiveGetStats,
+) -> Result<(), rootcause::Report<Error>>
+where
+    T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
+{
+    let dir = normalize_dir_path(remote_dir);
+    let entries = client.run(DirList { path: dir.clone() }).await?;
+    for entry in entries {
+        let child_remote = join_path(&dir, &entry.name);
+        let child_local = local_root.join(&entry.name);
+        if entry.is_directory {
+            tokio::fs::create_dir_all(&child_local)
+                .await
+                .map_err(Error::from)
+                .into_report()
+                .attach_with(|| format!("creating local directory {}", child_local.display()))?;
+            Box::pin(download_dir_recursive(
+                client,
+                &child_remote,
+                &child_local,
+                ui,
+                stats,
+            ))
+            .await?;
+        } else {
+            let (copied, _total) = download_single_file(
+                client,
+                &child_remote,
+                &child_local,
+                GetFileRange::WholeFile,
+                ui,
+            )
+            .await?;
+            stats.files += 1;
+            stats.bytes += copied;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_get_dir_output(
+    remote: &str,
+    output: Option<&str>,
+) -> Result<PathBuf, rootcause::Report<Error>> {
+    let basename = remote_basename(remote).unwrap_or_else(|| "download".to_owned());
+    match output {
+        None => Ok(PathBuf::from(basename)),
+        Some(explicit) => {
+            let p = PathBuf::from(explicit);
+            // If the user gave us an existing directory, drop the tree
+            // inside it (rather than overwriting). Otherwise use the
+            // path verbatim as the root.
+            if p.is_dir() {
+                Ok(p.join(basename))
+            } else {
+                Ok(p)
+            }
+        }
+    }
+}
+
+fn remote_basename(remote: &str) -> Option<String> {
+    // Strip drive prefix like `FLASH:` if present so the local path
+    // doesn't end up with a literal colon.
+    let after_drive = remote.split_once(':').map(|x| x.1).unwrap_or(remote);
+    after_drive
+        .rsplit(['\\', '/'])
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_owned())
+}
+
+fn resolve_get_output(
+    remote: &str,
+    output: Option<&str>,
+) -> Result<PathBuf, rootcause::Report<Error>> {
+    let basename = remote_basename(remote).ok_or_else(|| {
+        rootcause::Report::new(Error::from(xeedee::error::ArgumentError::EmptyFilename))
+            .attach(format!("cannot derive local filename from {remote:?}"))
+    })?;
+    match output {
+        None => Ok(PathBuf::from(basename)),
+        Some(explicit) => {
+            let p = PathBuf::from(explicit);
+            if p.is_dir() {
+                Ok(p.join(basename))
+            } else {
+                Ok(p)
+            }
+        }
+    }
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, Error> {
