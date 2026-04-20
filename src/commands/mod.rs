@@ -6,15 +6,22 @@
 #[cfg(feature = "dangerous")]
 pub mod dangerous;
 pub mod debug;
+pub mod debug_ext;
 pub mod file;
 pub mod fs;
 pub mod info;
 pub mod kv;
 pub mod memory;
 pub mod perf;
+#[cfg(feature = "capture")]
+pub mod pix;
 pub mod process;
 pub mod screenshot;
 pub mod system;
+
+pub use debug_ext::ExtensionHandle;
+pub use debug_ext::LoadDebuggerExtension;
+pub use debug_ext::UnloadDebuggerExtension;
 
 pub use debug::Breakpoint;
 pub use debug::BreakpointKind;

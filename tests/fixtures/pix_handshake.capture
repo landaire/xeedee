@@ -1,0 +1,18 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> PIX!{Connect}\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{Version} 65537\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{LimitCaptureSize} 256\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{BeginCaptureFileCreation} DEVKIT:\\snip.wmv\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{BeginCapture}\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{EndCapture}\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{EndCaptureFileCreation}\r\n
+S> 200- PIX!OK\r\n
+C> PIX!{Disconnect}\r\n
+S> 200- PIX!OK\r\n

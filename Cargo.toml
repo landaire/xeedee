@@ -49,6 +49,13 @@ cli = [
 tokio = ["dep:tokio", "dep:tokio-util"]
 jiff = ["dep:jiff"]
 image = ["dep:image"]
+# Video capture support. Currently targets xbmovie's `PIX!{...}` dialect,
+# which is a later-XDK variant. The xdk-main-nov11 kernel (which
+# deanxbox runs) exposes the movie subsystem via `pixcmd <subcommand>`
+# instead. See commands/pix/mod.rs for the full story. The module
+# compiles cleanly but is not wired in by default until we re-target it
+# to the real `pixcmd` protocol.
+capture = []
 # Dangerous, low-level commands that write into xbdm's code, dispatch
 # table, or data globals. These target specific structural patterns
 # rather than hardcoded addresses but any misidentification can crash

@@ -24,6 +24,10 @@ pub enum Error {
     #[error(transparent)]
     Transport(#[from] TransportError),
 
+    #[cfg(feature = "capture")]
+    #[error(transparent)]
+    Pix(#[from] crate::commands::pix::PixError),
+
     #[cfg(feature = "dangerous")]
     #[error(transparent)]
     Drivemap(#[from] crate::commands::dangerous::drivemap::DrivemapError),

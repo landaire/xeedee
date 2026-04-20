@@ -57,6 +57,10 @@ use xeedee::commands::WalkMem;
 use xeedee::commands::XbeInfo;
 #[cfg(feature = "dangerous")]
 use xeedee::commands::dangerous::drivemap as dm;
+#[cfg(feature = "capture")]
+use xeedee::commands::pix::CaptureSession;
+#[cfg(feature = "capture")]
+use xeedee::commands::pix::Notification;
 use xeedee::error::Error;
 use xeedee::transport::CaptureLog;
 use xeedee::transport::RecordingTransport;
@@ -408,6 +412,29 @@ enum Command {
         raw: bool,
     },
 
+    /// Drive the PIX movie-capture session on the console. Emits raw
+    /// intermediate segments to the console's HDD, downloads them to
+    /// the local `--output-dir`, and prints a notification log. Does
+    /// not transcode to WMV/MP4 yet -- that's Phase 2.
+    #[cfg(feature = "capture")]
+    Capture {
+        /// Device-side filename (without the
+        /// `\Device\Harddisk0\Partition1\DEVKIT\` prefix that xbmovie
+        /// traditionally adds); xeedee passes this through verbatim.
+        #[arg(long, default_value = "DEVKIT:\\xeedee_capture.wmv")]
+        remote: String,
+        /// Per-segment size cap in megabytes. Default 512 matches xbmovie.
+        #[arg(long, default_value_t = 512)]
+        size_limit_mb: u32,
+        /// Capture duration in seconds. If unset, capture continues
+        /// until you press Enter.
+        #[arg(long)]
+        duration: Option<u64>,
+        /// Local directory to drop downloaded segments into.
+        #[arg(long, default_value = "./xeedee-capture")]
+        output_dir: String,
+    },
+
     /// Send a raw command line and print the parsed response.
     Raw {
         /// The command line to send (no trailing CRLF).
@@ -610,12 +637,25 @@ async fn run_drivemap_enable(
     };
 
     let report = dm::enable(hijack, reconnect, Duration::from_secs(3)).await?;
-    eprintln!(
-        "{} drivemap internal enabled. drives went from {} -> {} entries.",
-        ok_tag("done"),
-        report.drives_before.len(),
-        report.drives_after.len()
-    );
+    if report.already_enabled {
+        eprintln!(
+            "{} drivemap flag already set; skipped hijack. {} drive{} visible.",
+            ok_tag("no-op"),
+            report.drives_after.len(),
+            if report.drives_after.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    } else {
+        eprintln!(
+            "{} drivemap internal enabled. drives went from {} -> {} entries.",
+            ok_tag("done"),
+            report.drives_before.len(),
+            report.drives_after.len()
+        );
+    }
     for drive in &report.drives_after {
         println!("{drive}");
     }
@@ -1350,6 +1390,23 @@ where
                 eprintln!("{} PNG to {output}", ok_tag("wrote"));
             }
         }
+        #[cfg(feature = "capture")]
+        Command::Capture {
+            remote,
+            size_limit_mb,
+            duration,
+            output_dir,
+        } => {
+            run_capture(
+                &mut client,
+                &remote,
+                size_limit_mb,
+                duration.map(Duration::from_secs),
+                &output_dir,
+                &ui,
+            )
+            .await?;
+        }
         Command::Raw { line } => {
             let resp = client.send_raw(&line).await?;
             println!("{resp:#?}");
@@ -1472,6 +1529,124 @@ fn print_hex_dump(base: u32, data: &[u8], unmapped: &[u32]) {
         }
         println!("|");
     }
+}
+
+#[cfg(feature = "capture")]
+async fn run_capture<T>(
+    client: &mut xeedee::Client<T, xeedee::Connected>,
+    remote: &str,
+    size_limit_mb: u32,
+    duration: Option<Duration>,
+    output_dir: &str,
+    ui: &UiCtx,
+) -> Result<(), rootcause::Report<Error>>
+where
+    T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
+{
+    std::fs::create_dir_all(output_dir)
+        .map_err(Error::from)
+        .into_report()
+        .attach_with(|| format!("creating local output dir {output_dir}"))?;
+
+    let mut session = CaptureSession::connect(client).await?;
+    eprintln!("{} pix session ready", ok_tag("connected"));
+
+    session.limit_capture_size_mb(size_limit_mb).await?;
+    session.begin_capture_file_creation(remote).await?;
+    eprintln!("{} prepared capture -> {remote}", ok_tag("ready"));
+
+    session.begin_capture().await?;
+    eprintln!(
+        "{} capturing; {}",
+        ok_tag("recording"),
+        match duration {
+            Some(d) => format!("stopping in {}s", d.as_secs()),
+            None => "press Enter to stop".to_owned(),
+        }
+    );
+
+    let stop_signal = async {
+        match duration {
+            Some(d) => {
+                tokio::time::sleep(d).await;
+            }
+            None => {
+                let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+                use tokio::io::AsyncBufReadExt as _;
+                let mut lines = stdin.lines();
+                let _ = lines.next_line().await;
+            }
+        }
+    };
+    stop_signal.await;
+
+    session.end_capture().await?;
+    session.end_capture_file_creation().await?;
+    session.disconnect().await?;
+    eprintln!(
+        "{} capture wrapped up, downloading segments",
+        ok_tag("done")
+    );
+
+    // Poll the console for segments (xbmovie uses notifications; polling
+    // is fine for a v0 implementation). Segment file names follow the
+    // pattern `<base>N.<ext>`: we strip the final `.wmv` on the remote
+    // path and append `N.wmv` starting at 0.
+    let (base, ext) = match remote.rfind('.') {
+        Some(dot) => (&remote[..dot], &remote[dot..]),
+        None => (remote, ""),
+    };
+
+    let mut segments_downloaded: u32 = 0;
+    for index in 0u32..256 {
+        let segment_remote = format!("{base}{index}{ext}");
+        let attrs = client
+            .run(GetFileAttributes {
+                path: segment_remote.clone(),
+            })
+            .await;
+        let attrs = match attrs {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        if attrs.is_directory {
+            break;
+        }
+        let local_path = format!("{output_dir}/segment-{:03}.bin", index);
+        let download = client
+            .get_file(&segment_remote, GetFileRange::WholeFile)
+            .await?;
+        let total = download.total();
+        let bar = ui.progress(total, &format!("segment {index}"));
+        let file = tokio::fs::File::create(&local_path)
+            .await
+            .map_err(Error::from)
+            .into_report()
+            .attach_with(|| format!("creating {local_path}"))?;
+        let compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(file);
+        let mut tracked = ProgressWrite::new(compat, bar.clone());
+        download.copy_into(&mut tracked).await?;
+        bar.finish_and_clear();
+        eprintln!(
+            "{} segment {index}: {total} bytes -> {local_path}",
+            ok_tag("saved")
+        );
+        let _ = client
+            .run(xeedee::commands::Delete {
+                path: segment_remote,
+                is_directory: false,
+            })
+            .await;
+        segments_downloaded += 1;
+    }
+
+    eprintln!(
+        "{} downloaded {segments_downloaded} segment{s}",
+        ok_tag("finished"),
+        s = if segments_downloaded == 1 { "" } else { "s" },
+    );
+    let _ = Notification::parse;
+    Ok(())
 }
 
 async fn run_discover(
