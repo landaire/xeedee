@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> xbeinfo RUNNING\r\n
+S> 202- multiline response follows\r\ntimestamp=0x00000000 checksum=0x00000000\r\nname="\\Device\\Flash\\xshell.xex"\r\n.\r\n

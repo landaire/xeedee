@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> isstopped THREAD=0xfb000018\r\n
+S> 408- not stopped\r\n

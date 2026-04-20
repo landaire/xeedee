@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> drivelist\r\n
+S> 202- multiline response follows\r\ndrivename="SysCache0"\r\ndrivename="SysCache1"\r\ndrivename="SysCache2"\r\ndrivename="E"\r\ndrivename="DEVKIT"\r\ndrivename="HDD"\r\ndrivename="MUINT"\r\ndrivename="INTUSB"\r\n.\r\n

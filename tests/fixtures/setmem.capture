@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> setmem addr=0xfeef0000 data=DEADBEEF\r\n
+S> 200- set 4 bytes\r\n

@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> sendfile NAME="E:\\hi.txt" LENGTH=0x5\r\n
+S> 204- send binary data\r\n
+C> hello
+S> 200- OK\r\n

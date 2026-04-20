@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> getfile NAME="E:\\greet.txt"\r\n
+S> 203- binary response follows\r\n\x0e\x00\x00\x00hello, xbdm!\r\n

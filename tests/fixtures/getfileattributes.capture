@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> getfileattributes NAME="DEVKIT:\\music1.wma"\r\n
+S> 202- multiline response follows\r\nsizehi=0x0 sizelo=0x3b587 createhi=0x01ceaa65 createlo=0xf8a05900 changehi=0x01ceaa65 changelo=0xf8a05900\r\n.\r\n

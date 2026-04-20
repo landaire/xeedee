@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> dirlist NAME="DEVKIT:\\"\r\n
+S> 202- multiline response follows\r\nname="dmext" sizehi=0x0 sizelo=0x0 createhi=0x01cf4d2f createlo=0x07669a00 changehi=0x01cf4d2f changelo=0x07669a00 directory\r\nname="music1.wma" sizehi=0x0 sizelo=0x3b587 createhi=0x01ceaa65 createlo=0xf8a05900 changehi=0x01ceaa65 changelo=0xf8a05900\r\n.\r\n

@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> drivefreespace NAME="DEVKIT:\\"\r\n
+S> 202- multiline response follows\r\nfreetocallerlo=0x54d9c000 freetocallerhi=0x00000032 totalbyteslo=0x60618000 totalbyteshi=0x00000036 totalfreebyteslo=0x54d9c000 totalfreebyteshi=0x00000032\r\n.\r\n

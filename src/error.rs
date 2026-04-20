@@ -1,0 +1,113 @@
+use crate::protocol::ErrorCode;
+use crate::protocol::StatusCode;
+use crate::protocol::SuccessCode;
+
+pub type Result<T, E = rootcause::Report<Error>> = core::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("i/o error")]
+    Io(#[from] std::io::Error),
+
+    #[error("connection closed unexpectedly")]
+    ConnectionClosed,
+
+    #[error(transparent)]
+    Framing(#[from] FramingError),
+
+    #[error(transparent)]
+    Parse(#[from] ParseError),
+
+    #[error(transparent)]
+    Argument(#[from] ArgumentError),
+
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+
+    #[error("remote reported error {code} ({message:?})")]
+    Remote { code: ErrorCode, message: String },
+
+    #[error("unknown status code {raw}")]
+    UnknownStatusCode { raw: u16 },
+
+    #[error("expected {expected:?} response but got status {got}")]
+    UnexpectedStatus {
+        expected: ExpectedShape,
+        got: StatusCode,
+    },
+
+    #[error("expected success code {expected} but got {got}")]
+    UnexpectedSuccessCode {
+        expected: SuccessCode,
+        got: SuccessCode,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ExpectedShape {
+    SingleLine200,
+    Multiline202,
+    Binary203,
+    SendBinary204,
+    Connected201,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FramingError {
+    #[error("response line did not fit within the maximum length")]
+    LineTooLong,
+    #[error("response line contained non-UTF-8 bytes")]
+    NonUtf8Line,
+    #[error("response head shorter than three bytes")]
+    HeadTooShort,
+    #[error("status code contained a non-digit byte")]
+    NonDigitInStatus,
+    #[error("status code outside the 100-999 range")]
+    StatusOutOfRange,
+    #[error("expected the 201 connected banner")]
+    MissingBanner,
+    #[error("trailing garbage after response head")]
+    TrailingGarbageInHead,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("missing required key {key:?} in response")]
+    MissingKey { key: &'static str },
+    #[error("value for {key:?} has invalid hex digits")]
+    InvalidHexDigits { key: &'static str },
+    #[error("value for {key:?} is not a valid decimal u32")]
+    InvalidDecimalU32 { key: &'static str },
+    #[error("value for {key:?} is not a valid decimal u64")]
+    InvalidDecimalU64 { key: &'static str },
+    #[error("value for {key:?} is missing the 0q quadword prefix")]
+    MissingQuadwordPrefix { key: &'static str },
+    #[error("quadword for {key:?} is not exactly 16 hex digits")]
+    QuadwordWrongLength { key: &'static str },
+    #[error("quadword for {key:?} contains invalid hex digits")]
+    InvalidQuadwordHex { key: &'static str },
+    #[error("response line did not match the expected shape")]
+    UnrecognizedShape,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArgumentError {
+    #[error("quoted argument cannot contain an unescaped double quote")]
+    QuotedContainsDoubleQuote,
+    #[error("quoted argument cannot contain a carriage return or line feed")]
+    QuotedContainsCrlf,
+    #[error("dbgname value cannot contain CR, LF, or double quote")]
+    InvalidDbgNameChar,
+    #[error("filename cannot be empty")]
+    EmptyFilename,
+    #[error("memory length exceeds the protocol's u32 limit")]
+    MemoryLengthOverflow,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("command declared Binary body but did not supply binary_len")]
+    MissingBinaryLen,
+    #[error("timed out opening XBDM connection")]
+    ConnectTimeout,
+}

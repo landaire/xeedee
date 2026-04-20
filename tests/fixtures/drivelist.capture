@@ -1,0 +1,8 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> drivelist\r\n
+S> 202- multiline response follows\r\n
+S> drivename="D"\r\n
+S> drivename="E"\r\n
+S> drivename="Z"\r\n
+S> .\r\n

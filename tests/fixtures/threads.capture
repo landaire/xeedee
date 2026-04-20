@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> threads\r\n
+S> 202- thread list follows\r\n-83885992\r\n-83886000\r\n.\r\n

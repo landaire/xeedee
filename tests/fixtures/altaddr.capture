@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> altaddr\r\n
+S> 200- addr=0xc0a80119\r\n
