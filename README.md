@@ -67,14 +67,14 @@ xeedee -H 192.168.1.26 file get DEVKIT:\my-capture.xbm
 
 ## Features
 
-| flag         | what it enables                                              |
-|--------------|--------------------------------------------------------------|
-| `cli`        | The `xeedee` binary (`clap`, `indicatif`, `tabled`, etc.).   |
-| `tokio`      | `tokio::net::TcpStream` transport. Implied by `cli`.         |
-| `jiff`       | `jiff::Zoned` conversions on time-bearing response types.    |
-| `image`      | PNG screenshot decode via the `image` crate.                 |
-| `capture`    | Video capture over the PIX! protocol and `.xbm` detiling.    |
-| `dangerous`  | In-memory patches to xbdm (nand-dump, drivemap-enable, etc). |
+| flag        | what it enables                                              |
+| ----------- | ------------------------------------------------------------ |
+| `cli`       | The `xeedee` binary (`clap`, `indicatif`, `tabled`, etc.).   |
+| `tokio`     | `tokio::net::TcpStream` transport. Implied by `cli`.         |
+| `jiff`      | `jiff::Zoned` conversions on time-bearing response types.    |
+| `image`     | PNG screenshot decode via the `image` crate.                 |
+| `capture`   | Video capture over the PIX! protocol and `.xbm` detiling.    |
+| `dangerous` | In-memory patches to xbdm (nand-dump, drivemap-enable, etc). |
 
 All non-transport, non-CLI features are off by default.
 
@@ -92,7 +92,6 @@ Implemented and exercised against a real v10888-based devkit (`xbdm-main-nov11`)
 
 Not implemented:
 
-- No exploration of titles (xam / xbox live / certificate APIs).
 - No MP4 encoding in-crate; the `capture` path shells out to `ffmpeg`
   for H.264 muxing.
 

@@ -5,9 +5,8 @@ edition = "2024"
 description = "Async-first Rust reimplementation of the XBDM (Xbox Debug Monitor) protocol"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/landerbrandt/xeedee"
+repository = "https://github.com/landaire/xeedee"
 keywords = ["xbox", "xbox360", "xbdm", "devkit", "debugger"]
-categories = ["development-tools", "network-programming", "games"]
 autobins = false
 exclude = [
     "/flash",
