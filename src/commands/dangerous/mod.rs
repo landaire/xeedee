@@ -11,7 +11,7 @@
 //!    for stable string literals or instruction-level semantic patterns
 //!    inside xbdm's own image, then derive addresses from those. The
 //!    drivemap implementation relies on `"DEVICE"`, `"\Device"`,
-//!    `"drivemap"`, `"internal"`, and `"altaddr"` — all stable
+//!    `"drivemap"`, `"internal"`, and `"altaddr"` - all stable
 //!    regardless of xbdm build.
 //!
 //! 2. **Verify every discovery two ways.** Each time we think we've

@@ -138,17 +138,10 @@ impl CaptureProfile {
     }
 }
 
-// =========================================================================
-// Stock profiles
-//
-// These mirror the ten Windows Media Profile XML strings xbmovie ships in
-// its `.rdata`. Wire format is a simple `<profile version="589824">`
-// document describing the audio + video stream configs; the console's
-// PIX extension consumes it verbatim.
-//
-// We use `&str` constants rather than a heap allocation so there is
-// exactly one copy per preset in the binary.
-// =========================================================================
+// The ten Windows Media Profile XML strings xbmovie ships in its `.rdata`.
+// Wire format is a `<profile version="589824">` document describing the
+// audio + video stream configs; the console's PIX extension consumes it
+// verbatim.
 
 const STOCK_X1_1080P_XML: &str = r#"<profile version="589824" storageformat="1" name="XBMovie_X1_V90_15MVideo1080p_384KAudio5.1" description="Streams: 1 audio 1 video">
     <streamconfig majortype="{73646976-0000-0010-8000-00AA00389B71}" streamnumber="2" streamname="Video2" inputname="Video" bitrate="15000000" bufferwindow="8000" reliabletransport="0" decodercomplexity="AP" rfc1766langid="en-us">

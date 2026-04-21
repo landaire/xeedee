@@ -1,7 +1,7 @@
 //! Two distinct PIX wire protocols live on an Xbox 360 devkit. This
 //! module exposes helpers for both.
 //!
-//! # 1. `pixcmd` — the PIX profiler (lives in xbdm itself)
+//! # 1. `pixcmd` - the PIX profiler (lives in xbdm itself)
 //!
 //! xbdm registers a first-party `pixcmd` command. Its handler
 //! at `xbdm 0x91f56b88` is a first-letter switch over positional
@@ -10,7 +10,7 @@
 //! `PIX!Trace` style notifications). [`PixCmd`] is the thin wrapper
 //! for this.
 //!
-//! # 2. `PIX!{Token}` — the xbmovie video capture (lives in the title)
+//! # 2. `PIX!{Token}` - the xbmovie video capture (lives in the title)
 //!
 //! Any running title (dash.xex, xshell.xex, bootanim.xex, etc.) that
 //! links the D3D runtime registers itself as the handler for the

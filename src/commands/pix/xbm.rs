@@ -217,43 +217,20 @@ impl XbmHeader {
 /// Detile a single frame from the on-device layout into plain NV12
 /// (Y plane, then interleaved UV plane).
 ///
-/// Layout recovered by tracing the LLIL of
-/// `xbmovie.exe:sub_42ab60`. The file is a flat stream of 12-byte
-/// sub-blocks. For each iteration N starting at file byte
-/// `N * 12`, write to an on-screen 2x4 patch whose top-left pixel
-/// is `(base_x, base_y)`, with:
+/// Recovered by tracing `xbmovie.exe:sub_41e476` (the decoder for
+/// magic `0x53A722B4`; the thumbnail magic `0x53A722B5` goes through
+/// a different function with a different layout).
 ///
-/// * `b = N & 1`
-/// * `ihalf = N >> 1`
-/// * `q = ihalf / (aligned_height / 4)`  (strip column index)
-/// * `r = ihalf % (aligned_height / 4)`  (row index within strip)
-/// * `base_x = 2 * b + 4 * q`
-/// * `base_y = 4 * r`
+/// The frame is tiled as 32x32 pixel super-blocks in raster order.
+/// Each super-block is 1536 bytes = 32 iters * 48 bytes, and each
+/// iter fills a 16x2 patch with:
+/// * y offset within super-block: `2 * (i & 15)`
+/// * x offset: `16 * ((i >> 4) & 1)` (iters 0..15 fill the left
+///   16-wide half top-to-bottom, iters 16..31 fill the right half).
 ///
-/// So iterations raster column-major in 4-wide strips: first all of
-/// `x in 0..4, y in 0..aligned_height`, then `x in 4..8`, etc.
-/// Within each strip, iters alternate between the left 2-wide
-/// half (b=0) and right half (b=1) and step down in 4-row chunks.
-///
-/// Byte map within each 12-byte sub-block (local `(lx, ly)`, with
-/// `lx` in 0..2 and `ly` in 0..4):
-///
-/// ```text
-/// byte 0 -> Y at (1, 1)    byte 4 -> Y at (1, 3)
-/// byte 1 -> Y at (1, 0)    byte 5 -> Y at (1, 2)
-/// byte 2 -> Y at (0, 1)    byte 6 -> Y at (0, 3)
-/// byte 3 -> Y at (0, 0)    byte 7 -> Y at (0, 2)
-/// byte 8  -> "B" chroma for bottom 2x2 (ly in 2..4)
-/// byte 9  -> "A" chroma for bottom 2x2
-/// byte 10 -> "B" chroma for top 2x2 (ly in 0..2)
-/// byte 11 -> "A" chroma for top 2x2
-/// ```
-///
-/// In xbmovie's intermediate buffer the "A" chroma lives at lpMem
-/// slot +0 and "B" at slot +8 (Y is the middle slot +4). Which of
-/// A/B is U vs V is determined by the YUV->RGB matrix constants at
-/// `data_46a150..0x46a188`. By convention here we emit A as V and
-/// B as U for BT.601.
+/// Per-iter bytes: 32 Y (one per pixel in the 16x2 patch, in the
+/// permutation spelled out in [`Y_MAP`]) followed by 16 chroma
+/// bytes (1 NV12 chroma row of 8 UV pairs).
 ///
 /// Input and output buffers must both equal
 /// [`XbmHeader::frame_pixel_bytes`] in size.
@@ -265,36 +242,8 @@ pub fn detile_frame(input: &[u8], output: &mut [u8], header: &XbmHeader) {
     assert_eq!(input.len(), y_plane_len + uv_plane_len);
     assert_eq!(output.len(), y_plane_len + uv_plane_len);
 
-    // Layout recovered by tracing xbmovie.exe:sub_41e476 (the
-    // decoder for magic 0x53a722b4 -- my earlier work was on
-    // sub_42ab60 which only handles the 0x53a722b5 thumbnail
-    // magic).
-    //
-    // The frame is tiled into 32x32 pixel super-blocks raster
-    // left-to-right, top-to-bottom. Each super-block is 1536 bytes
-    // = 32 iters x 48 bytes. Each iter fills a 16x2 patch in the
-    // super-block with layout:
-    //
-    //   iter i inside super-block:
-    //     y_offset = 2 * (i & 15)       (0..30, stepping by 2)
-    //     x_offset = 16 * ((i >> 4) & 1)  (0 or 16)
-    //
-    // i.e. iters 0..15 fill the left 16-pixel-wide column of the
-    // super-block top-to-bottom, then iters 16..31 fill the right
-    // 16-pixel-wide column.
-    //
-    // Each 48-byte iter contains 32 Y bytes for the 16x2 patch
-    // (32 pixels) followed by 16 chroma bytes for 8 UV pairs
-    // (4:2:0 chroma covering the 16x2 region = 8x1 chroma
-    // samples). Y is row-major within the patch; chroma is NV12-
-    // style row-major UV interleaved.
-    // Y byte-to-pixel map inside a single iter's 16x2 patch.
-    // Entry i = (lx, ly) for byte i (i in 0..32). Derived from the
-    // shuffle chain in sub_41e476. Each 4-byte group fills either
-    // the even-x or odd-x columns of a patch row in REVERSE x
-    // order (byte 0 = x=6, byte 1 = x=4, byte 2 = x=2, byte 3 =
-    // x=0; byte 4 = x=7, byte 5 = x=5, byte 6 = x=3, byte 7 = x=1;
-    // then repeat for row 1; then same for right 8 pixels).
+    // Each 4-byte group of Y bytes fills either the even-x or
+    // odd-x columns of one patch row in reverse x order.
     const Y_MAP: [(usize, usize); 32] = [
         (6, 0), (4, 0), (2, 0), (0, 0),
         (7, 0), (5, 0), (3, 0), (1, 0),
