@@ -16,7 +16,12 @@
 use std::collections::HashMap;
 use std::io::Read;
 
-use powerpc::{Argument, Extensions, Ins, InsIter, Opcode, Uimm};
+use powerpc::Argument;
+use powerpc::Extensions;
+use powerpc::Ins;
+use powerpc::InsIter;
+use powerpc::Opcode;
+use powerpc::Uimm;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -28,10 +33,7 @@ fn main() {
         .read_to_string(&mut buf)
         .expect("stdin read");
     let bytes = parse_hex(&buf);
-    assert!(
-        bytes.len().is_multiple_of(4),
-        "need a multiple of 4 bytes"
-    );
+    assert!(bytes.len().is_multiple_of(4), "need a multiple of 4 bytes");
 
     // First pass: collect lis destinations so we can annotate the
     // matching addi and follow bl targets.
@@ -59,20 +61,16 @@ fn main() {
                 }
             }
             Opcode::Addi => {
-                if let (
-                    Some(Argument::GPR(rt)),
-                    Some(Argument::GPR(ra)),
-                    Some(simm),
-                ) = (
+                if let (Some(Argument::GPR(rt)), Some(Argument::GPR(ra)), Some(simm)) = (
                     operands.first().copied(),
                     operands.get(1).copied(),
                     operands.get(2).and_then(|a| simm_of(a)),
                 ) {
-                    if ra.0 != 0 && let Some(&(lis_addr, hi)) = lis_state.get(&ra.0) {
+                    if ra.0 != 0
+                        && let Some(&(lis_addr, hi)) = lis_state.get(&ra.0)
+                    {
                         let resolved = combine(hi, simm);
-                        annotation = format!(
-                            "  # addr {resolved:#010x} (lis @ {lis_addr:#010x})"
-                        );
+                        annotation = format!("  # addr {resolved:#010x} (lis @ {lis_addr:#010x})");
                         // The target register rT is now holding the
                         // resolved address, so track it for chained
                         // references.
@@ -91,10 +89,7 @@ fn main() {
             _ => {}
         }
 
-        println!(
-            "{address:#010x}  {:08x}  {mnemonic}{annotation}",
-            ins.code
-        );
+        println!("{address:#010x}  {:08x}  {mnemonic}{annotation}", ins.code);
     }
 }
 

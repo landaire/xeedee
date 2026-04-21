@@ -59,11 +59,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let ctx_end = (i + nb.len() + ctx_size * 2).min(base.len());
                     let ctx: String = base[ctx_start..ctx_end]
                         .iter()
-                        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                        .map(|&b| {
+                            if (0x20..0x7f).contains(&b) {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        })
                         .collect();
-                    println!(
-                        "{name:30}  {needle:30}  @0x{i:08x}  |{ctx}|"
-                    );
+                    println!("{name:30}  {needle:30}  @0x{i:08x}  |{ctx}|");
                 }
             }
         }

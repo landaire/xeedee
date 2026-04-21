@@ -245,14 +245,38 @@ pub fn detile_frame(input: &[u8], output: &mut [u8], header: &XbmHeader) {
     // Each 4-byte group of Y bytes fills either the even-x or
     // odd-x columns of one patch row in reverse x order.
     const Y_MAP: [(usize, usize); 32] = [
-        (6, 0), (4, 0), (2, 0), (0, 0),
-        (7, 0), (5, 0), (3, 0), (1, 0),
-        (6, 1), (4, 1), (2, 1), (0, 1),
-        (7, 1), (5, 1), (3, 1), (1, 1),
-        (14, 0), (12, 0), (10, 0), (8, 0),
-        (15, 0), (13, 0), (11, 0), (9, 0),
-        (14, 1), (12, 1), (10, 1), (8, 1),
-        (15, 1), (13, 1), (11, 1), (9, 1),
+        (6, 0),
+        (4, 0),
+        (2, 0),
+        (0, 0),
+        (7, 0),
+        (5, 0),
+        (3, 0),
+        (1, 0),
+        (6, 1),
+        (4, 1),
+        (2, 1),
+        (0, 1),
+        (7, 1),
+        (5, 1),
+        (3, 1),
+        (1, 1),
+        (14, 0),
+        (12, 0),
+        (10, 0),
+        (8, 0),
+        (15, 0),
+        (13, 0),
+        (11, 0),
+        (9, 0),
+        (14, 1),
+        (12, 1),
+        (10, 1),
+        (8, 1),
+        (15, 1),
+        (13, 1),
+        (11, 1),
+        (9, 1),
     ];
 
     const ITER_BYTES: usize = 48;
@@ -408,25 +432,24 @@ impl<'a, R: Read + Seek> FrameCursor<'a, R> {
             None => self.expected_magic = Some(header.frame_magic),
             Some(expected) if expected == header.frame_magic => {}
             Some(_expected) => {
-                return Err(rootcause::Report::new(Error::from(
-                    XbmError::ImplausibleFrameSize {
+                return Err(
+                    rootcause::Report::new(Error::from(XbmError::ImplausibleFrameSize {
                         offset: self.next_offset,
                         size: 0,
-                    },
-                ))
-                .attach(format!(
-                    "frame magic at {:#x} does not match the first frame's sentinel",
-                    self.next_offset
-                )));
+                    }))
+                    .attach(format!(
+                        "frame magic at {:#x} does not match the first frame's sentinel",
+                        self.next_offset
+                    )),
+                );
             }
         }
 
         let pixels_relative = header.pixels_offset_within_record();
         let pixels_offset = self.next_offset + pixels_relative;
         let audio_offset = pixels_offset + file_header.frame_pixel_bytes() as u64;
-        let record_size = pixels_relative
-            + file_header.frame_pixel_bytes() as u64
-            + header.audio_bytes() as u64;
+        let record_size =
+            pixels_relative + file_header.frame_pixel_bytes() as u64 + header.audio_bytes() as u64;
 
         if self.next_offset + record_size > self.file_size {
             return Err(rootcause::Report::new(Error::from(
@@ -461,10 +484,12 @@ mod tests {
             MagicVariant::Alternate,
         ] {
             let round = MagicVariant::from_u32(v.as_u32()).unwrap();
-            assert!(matches!((v, round),
-                (MagicVariant::Standard, MagicVariant::Standard) |
-                (MagicVariant::Thumbnail, MagicVariant::Thumbnail) |
-                (MagicVariant::Alternate, MagicVariant::Alternate)));
+            assert!(matches!(
+                (v, round),
+                (MagicVariant::Standard, MagicVariant::Standard)
+                    | (MagicVariant::Thumbnail, MagicVariant::Thumbnail)
+                    | (MagicVariant::Alternate, MagicVariant::Alternate)
+            ));
         }
     }
 

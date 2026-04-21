@@ -188,10 +188,7 @@ where
     }
 
     /// Send `pixcmd <subcommand>` and return the raw response.
-    pub async fn raw(
-        &mut self,
-        subcommand: &str,
-    ) -> Result<Response, rootcause::Report<Error>> {
+    pub async fn raw(&mut self, subcommand: &str) -> Result<Response, rootcause::Report<Error>> {
         let mut wire = String::with_capacity("pixcmd ".len() + subcommand.len());
         wire.push_str("pixcmd");
         if !subcommand.is_empty() {
@@ -311,10 +308,12 @@ where
             other => {
                 let mut msg = String::new();
                 let _ = write!(msg, "expected 200 PIX!OK, got {other:?}");
-                Err(rootcause::Report::new(Error::from(
-                    PixError::UnexpectedResponse { response: other },
-                ))
-                .attach(msg))
+                Err(
+                    rootcause::Report::new(Error::from(PixError::UnexpectedResponse {
+                        response: other,
+                    }))
+                    .attach(msg),
+                )
             }
         }
     }

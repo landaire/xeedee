@@ -2112,10 +2112,7 @@ async fn run_capture(
     drop(client);
     let files_transport = connect_target_timeout(target, conn_timeout).await?;
     let mut client = xeedee::Client::new(files_transport).read_banner().await?;
-    eprintln!(
-        "{} capture finalised, downloading segments",
-        ok_tag("done")
-    );
+    eprintln!("{} capture finalised, downloading segments", ok_tag("done"));
 
     // Find segment files. xbmovie's file naming is
     // `<stem><N>.<ext>` where the remote path was `<stem>.<ext>`,
@@ -2179,10 +2176,7 @@ async fn run_capture(
             .await?;
         let total = download.total();
         if total == 0 {
-            eprintln!(
-                "{} segment {index}: empty, skipping",
-                warn_tag("skip:")
-            );
+            eprintln!("{} segment {index}: empty, skipping", warn_tag("skip:"));
             let _ = client
                 .run(xeedee::commands::Delete {
                     path: remote_path,
@@ -2243,10 +2237,7 @@ async fn run_capture(
             Some(stem) => format!("{stem}.mp4"),
             None => format!("{xbm_path}.mp4"),
         };
-        eprintln!(
-            "{} encoding {xbm_path} -> {mp4_path}",
-            ok_tag("converting"),
-        );
+        eprintln!("{} encoding {xbm_path} -> {mp4_path}", ok_tag("converting"),);
         match encode_xbm_to_mp4(xbm_path, &mp4_path, "frame", 0.0, 20, &[]).await {
             Ok(()) => {
                 if let Err(e) = std::fs::remove_file(xbm_path) {
@@ -2315,7 +2306,10 @@ async fn run_xbm(cmd: &XbmCommand) -> Result<(), rootcause::Report<Error>> {
             let header = XbmHeader::read(&mut f)?;
             println!(
                 "magic        {:?} ({:#010x})  version {:#010x}  header_size {:#x}",
-                header.variant, header.variant.as_u32(), header.version, header.header_size
+                header.variant,
+                header.variant.as_u32(),
+                header.version,
+                header.header_size
             );
             println!(
                 "frame        {}x{}  aligned {}x{}  (this drives pixel stride)",
@@ -2364,9 +2358,7 @@ async fn run_xbm(cmd: &XbmCommand) -> Result<(), rootcause::Report<Error>> {
                 } else {
                     0.0
                 };
-                println!(
-                    "timestamps   {a} -> {b} (span {span}, {seconds:.3}s, {fps:.2} fps)"
-                );
+                println!("timestamps   {a} -> {b} (span {span}, {seconds:.3}s, {fps:.2} fps)");
             }
             println!("audio bytes  {audio_bytes}");
             if let Some(sz) = first_record_size {
@@ -2402,9 +2394,9 @@ async fn run_xbm_extract(
     use std::io::Seek;
     use std::io::SeekFrom;
     use std::io::Write;
-    use xeedee::commands::pix::detile_frame;
     use xeedee::commands::pix::FrameCursor;
     use xeedee::commands::pix::XbmHeader;
+    use xeedee::commands::pix::detile_frame;
 
     std::fs::create_dir_all(output_dir)
         .map_err(Error::from)
@@ -2475,7 +2467,10 @@ async fn run_xbm_extract(
 
     let meta_path = format!("{output_dir}/metadata.txt");
     let fps = if timestamps.len() >= 2 {
-        let span = timestamps.last().unwrap().wrapping_sub(*timestamps.first().unwrap());
+        let span = timestamps
+            .last()
+            .unwrap()
+            .wrapping_sub(*timestamps.first().unwrap());
         if span > 0 {
             (timestamps.len() - 1) as f64 * header.timestamp_rate as f64 / span as f64
         } else {
@@ -2489,7 +2484,11 @@ async fn run_xbm_extract(
     } else {
         "nv12 (Y plane, then interleaved UV plane; detiled from on-device layout)"
     };
-    let ffmpeg_pixfmt = if raw { "nv12  # WILL NOT RENDER -- re-run without --raw" } else { "nv12" };
+    let ffmpeg_pixfmt = if raw {
+        "nv12  # WILL NOT RENDER -- re-run without --raw"
+    } else {
+        "nv12"
+    };
     let meta = format!(
         "# xbmovie .xbm frame dump\n\
          source: {file}\n\
@@ -2573,9 +2572,9 @@ async fn encode_xbm_to_mp4(
     use std::io::Write;
     use std::process::Command;
     use std::process::Stdio;
-    use xeedee::commands::pix::detile_frame;
     use xeedee::commands::pix::FrameCursor;
     use xeedee::commands::pix::XbmHeader;
+    use xeedee::commands::pix::detile_frame;
 
     let mut f = std::fs::File::open(file)
         .map_err(Error::from)
@@ -2681,10 +2680,7 @@ async fn encode_xbm_to_mp4(
         .map_err(Error::from)
         .into_report()
         .attach("spawning ffmpeg")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .expect("stdin configured as piped");
+    let mut stdin = child.stdin.take().expect("stdin configured as piped");
 
     let mut tiled = vec![0u8; pixel_bytes];
     let mut nv12 = vec![0u8; pixel_bytes];
@@ -2735,14 +2731,14 @@ fn which_ffmpeg() -> Result<(), rootcause::Report<Error>> {
     if ok {
         Ok(())
     } else {
-        Err(rootcause::Report::new(Error::from(
-            xeedee::error::ArgumentError::EmptyFilename,
-        ))
-        .attach(
-            "ffmpeg not found on $PATH. Install it (`nix-shell -p ffmpeg`, \
+        Err(
+            rootcause::Report::new(Error::from(xeedee::error::ArgumentError::EmptyFilename))
+                .attach(
+                    "ffmpeg not found on $PATH. Install it (`nix-shell -p ffmpeg`, \
              `brew install ffmpeg`, etc.) and retry. The `xbm encode` \
              subcommand streams decoded NV12 frames to ffmpeg's stdin.",
-        ))
+                ),
+        )
     }
 }
 
@@ -3252,7 +3248,6 @@ fn write_capture(
     eprintln!("capture written to {}", path.display());
     Ok(())
 }
-
 
 #[cfg(all(test, feature = "capture"))]
 mod capture_tests {

@@ -16,10 +16,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let base_str = args.next().expect("usage: cmdtbl <base> [len]");
     let base = parse_u32(&base_str).expect("base must parse");
-    let _len = args
-        .next()
-        .and_then(|s| parse_u32(&s))
-        .unwrap_or(u32::MAX);
+    let _len = args.next().and_then(|s| parse_u32(&s)).unwrap_or(u32::MAX);
 
     let mut buf = String::new();
     std::io::stdin()
