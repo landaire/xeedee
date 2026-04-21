@@ -25,14 +25,24 @@ fn hi_lo_u64(kv: &KvLine<'_>, hi: &'static str, lo: &'static str) -> Result<u64,
     Ok(((hi_val as u64) << 32) | (lo_val as u64))
 }
 
-/// `pclist`: enumerate the performance counters and memory pools the
-/// kernel exposes.
+/// `pclist`: enumerate every performance counter currently registered
+/// with XBDM. The set is dynamic - the kernel registers a base set at
+/// boot (CPU, audio, network, memory pools) and the running title can
+/// add its own (GPU pipeline stages, cmd-buffer bytes, VMX usage).
+///
+/// Each entry carries a `name` (pass-through string) and a `kind` tag
+/// that disambiguates counters sharing the same name but reporting
+/// different families of values. Feed both back to [`QueryPerfCounter`]
+/// to read a sample.
 #[derive(Debug, Clone, Copy)]
 pub struct PerfCounterList;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PerfCounterEntry {
+    /// Counter name as the kernel/title registered it. Case-sensitive.
     pub name: String,
+    /// Counter "type" tag from xbdm. Not an enum; treat as opaque and
+    /// pass verbatim to [`QueryPerfCounter::kind`].
     pub kind: u32,
 }
 
@@ -67,18 +77,31 @@ impl Command for PerfCounterList {
     }
 }
 
-/// `querypc NAME="<counter>" TYPE=<kind>`: snapshot a single performance
-/// counter's value and rate.
+/// `querypc NAME="<counter>" TYPE=<kind>`: snapshot a single
+/// performance counter's cumulative value and current rate.
+///
+/// Reply shape (from xbdm):
+/// `type=0x%08x vallo=0x%08x valhi=0x%08x ratelo=0x%08x ratehi=0x%08x`.
+/// The two 32-bit halves are combined into the `u64` fields on
+/// [`PerfCounterSample`]. Units depend on the counter: "rate" is
+/// typically per-second for time-based counters, per-frame for GPU
+/// counters. There is no meta-description wire command, so unit
+/// interpretation is on the caller.
 #[derive(Debug, Clone)]
 pub struct QueryPerfCounter {
+    /// Counter name, exactly as returned by [`PerfCounterList`].
     pub name: String,
+    /// `type` tag returned with the name in [`PerfCounterList`].
     pub kind: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PerfCounterSample {
+    /// Echo of the counter's `type` tag.
     pub kind: u32,
+    /// Cumulative counter value.
     pub value: u64,
+    /// Per-interval rate. Interval and unit are counter-specific.
     pub rate: u64,
 }
 

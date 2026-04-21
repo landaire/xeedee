@@ -150,7 +150,9 @@ enum LsSortBy {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum SortOrder {
+    /// Ascending (A-Z, smallest first, oldest first).
     Asc,
+    /// Descending (Z-A, largest first, newest first).
     Desc,
 }
 
@@ -183,6 +185,7 @@ enum Command {
 
     /// Read or set the debuggable name of the console.
     Dbgname {
+        /// New dbgname to write. Omit to just read the current value.
         #[arg(long)]
         set: Option<String>,
     },
@@ -208,76 +211,9 @@ enum Command {
         drive: String,
     },
 
-    /// List a directory's entries.
-    Ls {
-        /// Remote path, e.g. `DEVKIT:\\`.
-        path: String,
-
-        /// Field to sort by.
-        #[arg(long, value_enum, default_value_t = LsSortBy::Name)]
-        sort_by: LsSortBy,
-
-        /// Sort direction.
-        #[arg(long, value_enum, default_value_t = SortOrder::Desc)]
-        sort_order: SortOrder,
-    },
-
-    /// Recursively enumerate a directory tree. With no path, walks every
-    /// drive returned by `drivelist`.
-    Tree {
-        /// Remote path (e.g. `DEVKIT:\\`). Omit to walk every drive.
-        path: Option<String>,
-        /// Maximum recursion depth. 0 means unlimited.
-        #[arg(long, default_value_t = 0u32)]
-        max_depth: u32,
-        /// Hide files and print only directories (like `tree -d`). Off
-        /// by default, so leaf files are shown alongside directories.
-        #[arg(long = "dirs-only", short = 'd')]
-        dirs_only: bool,
-    },
-
-    /// Show metadata for a remote file or directory.
-    Stat {
-        /// Remote path.
-        path: String,
-    },
-
-    /// Create a remote directory.
-    Mkdir { path: String },
-
-    /// Delete a remote file (or directory with `--dir`).
-    Rm {
-        path: String,
-        #[arg(long)]
-        dir: bool,
-    },
-
-    /// Rename / move a remote path.
-    Mv { from: String, to: String },
-
-    /// Download a file (or, with `-r`, a directory tree) from the console.
-    Get {
-        /// Remote path to download.
-        remote: String,
-        /// Local destination. For a file, defaults to the remote's
-        /// basename in the current directory; if this names an existing
-        /// directory the file is written inside it. For a recursive
-        /// download, defaults to a new directory named after the
-        /// remote's basename in the current directory.
-        #[arg(short, long)]
-        output: Option<String>,
-        /// Recursively download a directory tree, mirroring it under
-        /// the local destination.
-        #[arg(short, long)]
-        recursive: bool,
-        /// Optional start offset. File mode only.
-        #[arg(long)]
-        offset: Option<u64>,
-        /// Optional byte count (required if `--offset` is set). File
-        /// mode only.
-        #[arg(long)]
-        size: Option<u64>,
-    },
+    /// File-system operations (ls, tree, stat, get, put, ...).
+    #[command(subcommand)]
+    File(FileCommand),
 
     /// Show the alternate (debug) IPv4 address.
     Altaddr,
@@ -295,16 +231,24 @@ enum Command {
     Modules,
 
     /// List sections of a named module.
-    Modsections { module: String },
+    Modsections {
+        /// Module name as reported by `modules` (e.g. `xboxkrnl.exe`).
+        module: String,
+    },
 
     /// List live thread ids.
     Threads,
 
     /// Show detailed info for one thread id (hex, `0x...`).
-    Threadinfo { thread: String },
+    Threadinfo {
+        /// Thread id in hex (e.g. `0xF8001234`).
+        thread: String,
+    },
 
     /// Show metadata for the currently running title (or a named xex).
     Xbeinfo {
+        /// Path to a specific xex (e.g. `DEVKIT:\game.xex`). Omit for
+        /// the running title.
         #[arg(long)]
         name: Option<String>,
     },
@@ -320,12 +264,32 @@ enum Command {
         length: String,
     },
 
-    /// List the kernel's performance counters.
+    /// List every performance counter the kernel and running title have
+    /// registered, as `type<TAB>name` pairs. The set is dynamic: a
+    /// freshly-booted dashboard typically exposes only a handful of
+    /// counters (CPU, audio, net), and a running title may add many more
+    /// (GPU pipeline stages, VMX usage, cmd-buffer bytes, etc.). Pipe
+    /// into a counter name to `querypc` to sample it.
     Pclist,
 
-    /// Query a single performance counter by name.
+    /// Sample a single performance counter by name. Returns the
+    /// counter's type tag, its cumulative value, and its current rate
+    /// (units depend on the counter). Names come from `pclist`; pass the
+    /// matching `type` from that listing as `--kind`, or just leave the
+    /// default if the counter only has one kind.
+    ///
+    /// Example:
+    ///   xeedee pclist                         # discover names + types
+    ///   xeedee querypc DX9Framerate --kind 1  # sample one
+    #[command(verbatim_doc_comment)]
     Querypc {
+        /// Counter name, exactly as it appears in the `name` column of
+        /// `pclist` (case-sensitive). Quote it if it contains spaces.
         name: String,
+        /// Counter-type selector (the `type` column from `pclist`).
+        /// XBDM uses this to disambiguate counters that share a name
+        /// but report different families of values. Most counters only
+        /// expose one kind, so the default (`1`) usually works.
         #[arg(long, default_value_t = 1)]
         kind: u32,
     },
@@ -334,26 +298,36 @@ enum Command {
     Sockets,
 
     /// Report whether a thread id is halted, and why.
-    Isstopped { thread: String },
+    Isstopped {
+        /// Thread id in hex (e.g. `0xF8001234`).
+        thread: String,
+    },
 
     /// Reboot the console. Flags may be combined.
     Reboot {
+        /// Warm reboot: keep the current title loaded.
         #[arg(long)]
         warm: bool,
+        /// Halt on entry so a debugger can attach before code runs.
         #[arg(long = "stop")]
         stop_on_start: bool,
+        /// Reboot without the debug monitor attached.
         #[arg(long = "nodebug")]
         no_debug: bool,
+        /// Block until the console comes back up on XBDM.
         #[arg(long)]
         wait: bool,
+        /// Launch this title after reboot instead of the default.
         #[arg(long)]
         title: Option<String>,
     },
 
     /// Set (or clear via `--nopersist`) the default title.
     SetTitle {
+        /// Clear the persistent default-title setting.
         #[arg(long)]
         nopersist: bool,
+        /// Path to the xex to set as default title.
         #[arg(conflicts_with = "nopersist")]
         name: Option<String>,
     },
@@ -368,46 +342,26 @@ enum Command {
 
     /// Set or clear an execution breakpoint.
     Bp {
+        /// Breakpoint address in hex (e.g. `0x8123ABCD`).
         address: String,
+        /// Remove the breakpoint at `address` instead of setting it.
         #[arg(long)]
         clear: bool,
     },
 
     /// Set or clear a data-access breakpoint (read / write / rw / exec).
     Databp {
+        /// Watched address in hex (e.g. `0x8123ABCD`).
         address: String,
-        /// Size in bytes.
+        /// Size in bytes of the watched region.
         size: u32,
-        /// Access kind: `read`, `write`, `readwrite`, or `execute`.
+        /// Access kind to trap on: `read`, `write`, `readwrite`, or
+        /// `execute` (default `write`).
         #[arg(long, default_value = "write")]
         kind: String,
+        /// Remove the data breakpoint instead of setting it.
         #[arg(long)]
         clear: bool,
-    },
-
-    /// Truncate or extend a file on the console.
-    Fileeof {
-        path: String,
-        size: u64,
-        #[arg(long)]
-        create: bool,
-    },
-
-    /// Upload a local file to a console path.
-    Put {
-        /// Local source file.
-        local: String,
-        /// Remote destination path.
-        remote: String,
-    },
-
-    /// Write a local file's contents to a byte range of an existing
-    /// console file.
-    Writeto {
-        local: String,
-        remote: String,
-        offset: u64,
-        length: u64,
     },
 
     /// Capture a screenshot and save it as PNG (or raw framebuffer when
@@ -502,6 +456,122 @@ enum Command {
     #[cfg(feature = "dangerous")]
     #[command(subcommand)]
     Dangerous(DangerousCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum FileCommand {
+    /// List a directory's entries.
+    Ls {
+        /// Remote path, e.g. `DEVKIT:\\`.
+        path: String,
+
+        /// Field to sort by.
+        #[arg(long, value_enum, default_value_t = LsSortBy::Name)]
+        sort_by: LsSortBy,
+
+        /// Sort direction.
+        #[arg(long, value_enum, default_value_t = SortOrder::Desc)]
+        sort_order: SortOrder,
+    },
+
+    /// Recursively enumerate a directory tree. With no path, walks every
+    /// drive returned by `drivelist`.
+    Tree {
+        /// Remote path (e.g. `DEVKIT:\\`). Omit to walk every drive.
+        path: Option<String>,
+        /// Maximum recursion depth. 0 means unlimited.
+        #[arg(long, default_value_t = 0u32)]
+        max_depth: u32,
+        /// Hide files and print only directories (like `tree -d`). Off
+        /// by default, so leaf files are shown alongside directories.
+        #[arg(long = "dirs-only", short = 'd')]
+        dirs_only: bool,
+    },
+
+    /// Show metadata for a remote file or directory.
+    Stat {
+        /// Remote path.
+        path: String,
+    },
+
+    /// Create a remote directory.
+    Mkdir {
+        /// Remote directory path to create (e.g. `DEVKIT:\new`).
+        path: String,
+    },
+
+    /// Delete a remote file (or directory with `--dir`).
+    Rm {
+        /// Remote path to delete.
+        path: String,
+        /// Target is a directory; required to delete non-empty dirs.
+        #[arg(long)]
+        dir: bool,
+    },
+
+    /// Rename / move a remote path.
+    Mv {
+        /// Source remote path.
+        from: String,
+        /// Destination remote path.
+        to: String,
+    },
+
+    /// Download a file (or, with `-r`, a directory tree) from the console.
+    Get {
+        /// Remote path to download.
+        remote: String,
+        /// Local destination. For a file, defaults to the remote's
+        /// basename in the current directory; if this names an existing
+        /// directory the file is written inside it. For a recursive
+        /// download, defaults to a new directory named after the
+        /// remote's basename in the current directory.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Recursively download a directory tree, mirroring it under
+        /// the local destination.
+        #[arg(short, long)]
+        recursive: bool,
+        /// Optional start offset. File mode only.
+        #[arg(long)]
+        offset: Option<u64>,
+        /// Optional byte count (required if `--offset` is set). File
+        /// mode only.
+        #[arg(long)]
+        size: Option<u64>,
+    },
+
+    /// Upload a local file to a console path.
+    Put {
+        /// Local source file.
+        local: String,
+        /// Remote destination path.
+        remote: String,
+    },
+
+    /// Write a local file's contents to a byte range of an existing
+    /// console file.
+    Writeto {
+        /// Local source file whose bytes will be written.
+        local: String,
+        /// Existing remote file to patch.
+        remote: String,
+        /// Byte offset in the remote file where the write begins.
+        offset: u64,
+        /// Number of bytes to read from `local` and write.
+        length: u64,
+    },
+
+    /// Truncate or extend a file on the console.
+    Fileeof {
+        /// Remote file path.
+        path: String,
+        /// New end-of-file size in bytes.
+        size: u64,
+        /// Create the file if it doesn't already exist.
+        #[arg(long)]
+        create: bool,
+    },
 }
 
 #[cfg(feature = "capture")]
@@ -638,6 +708,18 @@ impl UiCtx {
             n.to_string()
         } else {
             humanize_bytes(n)
+        }
+    }
+    /// Render a `FileTime` for humans as a local-time ISO-8601 string
+    /// ("2026-04-20 15:42:10"). Falls back to the raw FILETIME hex only
+    /// if the value is outside jiff's representable range.
+    fn fmt_time(&self, ft: xeedee::FileTime) -> String {
+        match ft.into_jiff_timestamp() {
+            Ok(ts) => ts
+                .to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+            Err(_) => format!("{:#018x}", ft.as_raw()),
         }
     }
 }
@@ -943,15 +1025,7 @@ where
         }
         Command::Systime => {
             let result = client.run(SysTime).await?;
-            let sys = result.file_time.into_system_time();
-            let unix = sys
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            println!(
-                "filetime_raw={raw:#x} unix_seconds={unix}",
-                raw = result.file_time.as_raw()
-            );
+            println!("{}", ui.fmt_time(result.file_time));
         }
         Command::Dmversion => {
             let version = client.run(DmVersion).await?;
@@ -1020,158 +1094,220 @@ where
                 );
             }
         }
-        Command::Tree {
-            path,
-            max_depth,
-            dirs_only,
-        } => {
-            run_tree(&mut client, path, max_depth, !dirs_only, ui).await?;
-        }
-        Command::Ls {
-            path,
-            sort_by,
-            sort_order,
-        } => {
-            let mut entries = client.run(DirList { path: path.clone() }).await?;
-            sort_dir_entries(&mut entries, sort_by, sort_order);
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    name: String,
-                    size: String,
-                    kind: String,
-                    #[tabled(rename = "changed")]
-                    changed: String,
-                }
-                let rows: Vec<Row> = entries
-                    .iter()
-                    .map(|e| Row {
-                        name: e.name.clone(),
-                        size: if e.is_directory {
-                            "-".into()
-                        } else {
-                            ui.fmt_bytes(e.size)
-                        },
-                        kind: if e.is_directory {
-                            "DIR".into()
-                        } else {
-                            "FILE".into()
-                        },
-                        changed: format!("{:#018x}", e.change_time.as_raw()),
-                    })
-                    .collect();
-                print_colored_table(&heading_label(&format!("ls {path}"), &ui), rows, &ui);
-            } else {
-                for entry in entries {
-                    println!(
-                        "{}\t{}\t{}\t{}",
-                        entry.name,
-                        if entry.is_directory {
-                            "-".into()
-                        } else {
-                            ui.fmt_bytes(entry.size)
-                        },
-                        if entry.is_directory { "DIR" } else { "FILE" },
-                        entry.change_time.as_raw()
-                    );
+        Command::File(fc) => match fc {
+            FileCommand::Tree {
+                path,
+                max_depth,
+                dirs_only,
+            } => {
+                run_tree(&mut client, path, max_depth, !dirs_only, ui).await?;
+            }
+            FileCommand::Ls {
+                path,
+                sort_by,
+                sort_order,
+            } => {
+                let mut entries = client.run(DirList { path: path.clone() }).await?;
+                sort_dir_entries(&mut entries, sort_by, sort_order);
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        name: String,
+                        size: String,
+                        kind: String,
+                        #[tabled(rename = "changed")]
+                        changed: String,
+                    }
+                    let rows: Vec<Row> = entries
+                        .iter()
+                        .map(|e| Row {
+                            name: e.name.clone(),
+                            size: if e.is_directory {
+                                "-".into()
+                            } else {
+                                ui.fmt_bytes(e.size)
+                            },
+                            kind: if e.is_directory {
+                                "DIR".into()
+                            } else {
+                                "FILE".into()
+                            },
+                            changed: ui.fmt_time(e.change_time),
+                        })
+                        .collect();
+                    print_colored_table(&heading_label(&format!("ls {path}"), &ui), rows, &ui);
+                } else {
+                    for entry in entries {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            entry.name,
+                            if entry.is_directory {
+                                "-".into()
+                            } else {
+                                ui.fmt_bytes(entry.size)
+                            },
+                            if entry.is_directory { "DIR" } else { "FILE" },
+                            ui.fmt_time(entry.change_time),
+                        );
+                    }
                 }
             }
-        }
-        Command::Stat { path } => {
-            let attrs = client.run(GetFileAttributes { path }).await?;
-            println!(
-                "size={} create_filetime={:#x} change_filetime={:#x} is_directory={}",
-                if attrs.is_directory {
-                    "-".into()
-                } else {
-                    ui.fmt_bytes(attrs.size)
-                },
-                attrs.create_time.as_raw(),
-                attrs.change_time.as_raw(),
-                attrs.is_directory
-            );
-        }
-        Command::Mkdir { path } => {
-            client.run(MakeDirectory { path }).await?;
-        }
-        Command::Rm { path, dir } => {
-            client
-                .run(Delete {
-                    path,
-                    is_directory: dir,
-                })
-                .await?;
-        }
-        Command::Mv { from, to } => {
-            client.run(Rename { from, to }).await?;
-        }
-        Command::Get {
-            remote,
-            output,
-            recursive,
-            offset,
-            size,
-        } => {
-            let attrs = client
-                .run(GetFileAttributes {
-                    path: remote.clone(),
-                })
-                .await
-                .ok();
-            let is_directory = attrs.as_ref().map(|a| a.is_directory).unwrap_or(false);
-
-            if is_directory {
-                if !recursive {
-                    return Err(rootcause::Report::new(Error::from(
-                        xeedee::error::ArgumentError::EmptyFilename,
-                    ))
-                    .attach(format!(
-                        "{remote:?} is a directory; pass -r for recursive download"
-                    )));
-                }
-                if offset.is_some() || size.is_some() {
-                    return Err(rootcause::Report::new(Error::from(
-                        xeedee::error::ArgumentError::EmptyFilename,
-                    ))
-                    .attach("--offset / --size are file-mode only, not valid with -r"));
-                }
-                let root = resolve_get_dir_output(&remote, output.as_deref())?;
-                tokio::fs::create_dir_all(&root)
-                    .await
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach_with(|| format!("creating local directory {}", root.display()))?;
-                let mut stats = RecursiveGetStats::default();
-                download_dir_recursive(&mut client, &remote, &root, ui, &mut stats).await?;
-                eprintln!(
-                    "{} {} file{} ({} total) under {}",
-                    ok_tag("downloaded"),
-                    stats.files,
-                    if stats.files == 1 { "" } else { "s" },
-                    ui.fmt_bytes(stats.bytes),
-                    root.display()
+            FileCommand::Stat { path } => {
+                let attrs = client.run(GetFileAttributes { path }).await?;
+                println!(
+                    "size={} created={} changed={} is_directory={}",
+                    if attrs.is_directory {
+                        "-".into()
+                    } else {
+                        ui.fmt_bytes(attrs.size)
+                    },
+                    ui.fmt_time(attrs.create_time),
+                    ui.fmt_time(attrs.change_time),
+                    attrs.is_directory,
                 );
-            } else {
-                let range = match (offset, size) {
-                    (Some(offset), Some(size)) => GetFileRange::Range { offset, size },
-                    (None, None) => GetFileRange::WholeFile,
-                    _ => {
+            }
+            FileCommand::Mkdir { path } => {
+                client.run(MakeDirectory { path }).await?;
+            }
+            FileCommand::Rm { path, dir } => {
+                client
+                    .run(Delete {
+                        path,
+                        is_directory: dir,
+                    })
+                    .await?;
+            }
+            FileCommand::Mv { from, to } => {
+                client.run(Rename { from, to }).await?;
+            }
+            FileCommand::Get {
+                remote,
+                output,
+                recursive,
+                offset,
+                size,
+            } => {
+                let attrs = client
+                    .run(GetFileAttributes {
+                        path: remote.clone(),
+                    })
+                    .await
+                    .ok();
+                let is_directory = attrs.as_ref().map(|a| a.is_directory).unwrap_or(false);
+
+                if is_directory {
+                    if !recursive {
                         return Err(rootcause::Report::new(Error::from(
                             xeedee::error::ArgumentError::EmptyFilename,
                         ))
-                        .attach("--offset and --size must be provided together"));
+                        .attach(format!(
+                            "{remote:?} is a directory; pass -r for recursive download"
+                        )));
                     }
-                };
-                let output_path = resolve_get_output(&remote, output.as_deref())?;
-                let (copied, total) =
-                    download_single_file(&mut client, &remote, &output_path, range, ui).await?;
+                    if offset.is_some() || size.is_some() {
+                        return Err(rootcause::Report::new(Error::from(
+                            xeedee::error::ArgumentError::EmptyFilename,
+                        ))
+                        .attach("--offset / --size are file-mode only, not valid with -r"));
+                    }
+                    let root = resolve_get_dir_output(&remote, output.as_deref())?;
+                    tokio::fs::create_dir_all(&root)
+                        .await
+                        .map_err(Error::from)
+                        .into_report()
+                        .attach_with(|| format!("creating local directory {}", root.display()))?;
+                    let mut stats = RecursiveGetStats::default();
+                    download_dir_recursive(&mut client, &remote, &root, ui, &mut stats).await?;
+                    eprintln!(
+                        "{} {} file{} ({} total) under {}",
+                        ok_tag("downloaded"),
+                        stats.files,
+                        if stats.files == 1 { "" } else { "s" },
+                        ui.fmt_bytes(stats.bytes),
+                        root.display()
+                    );
+                } else {
+                    let range = match (offset, size) {
+                        (Some(offset), Some(size)) => GetFileRange::Range { offset, size },
+                        (None, None) => GetFileRange::WholeFile,
+                        _ => {
+                            return Err(rootcause::Report::new(Error::from(
+                                xeedee::error::ArgumentError::EmptyFilename,
+                            ))
+                            .attach("--offset and --size must be provided together"));
+                        }
+                    };
+                    let output_path = resolve_get_output(&remote, output.as_deref())?;
+                    let (copied, total) =
+                        download_single_file(&mut client, &remote, &output_path, range, ui).await?;
+                    eprintln!(
+                        "{} {copied} bytes ({total} declared) to {}",
+                        ok_tag("downloaded"),
+                        output_path.display()
+                    );
+                }
+            }
+            FileCommand::Put { local, remote } => {
+                let metadata = std::fs::metadata(&local)
+                    .map_err(Error::from)
+                    .into_report()
+                    .attach_with(|| format!("stat local file {local:?}"))?;
+                let size = metadata.len();
+                let mut file = tokio::fs::File::open(&local)
+                    .await
+                    .map_err(Error::from)
+                    .into_report()
+                    .attach_with(|| format!("opening local file {local:?}"))?;
+                let upload = client
+                    .send_file(&remote, FileUploadKind::Create { size })
+                    .await?;
+                let bar = ui.progress(size, "upload");
+                let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
+                let mut tracked = ProgressRead::new(compat, bar.clone());
+                upload.copy_from(&mut tracked).await?;
+                bar.finish_and_clear();
+                eprintln!("{} {size} bytes to {remote}", ok_tag("uploaded"));
+            }
+            FileCommand::Writeto {
+                local,
+                remote,
+                offset,
+                length,
+            } => {
+                let mut file = tokio::fs::File::open(&local)
+                    .await
+                    .map_err(Error::from)
+                    .into_report()
+                    .attach_with(|| format!("opening local file {local:?}"))?;
+                let upload = client
+                    .send_file(
+                        &remote,
+                        FileUploadKind::WriteAt {
+                            offset,
+                            size: length,
+                        },
+                    )
+                    .await?;
+                let bar = ui.progress(length, "write");
+                let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
+                let mut tracked = ProgressRead::new(compat, bar.clone());
+                upload.copy_from(&mut tracked).await?;
+                bar.finish_and_clear();
                 eprintln!(
-                    "{} {copied} bytes ({total} declared) to {}",
-                    ok_tag("downloaded"),
-                    output_path.display()
+                    "{} {length} bytes at offset {offset} in {remote}",
+                    ok_tag("wrote")
                 );
             }
-        }
+            FileCommand::Fileeof { path, size, create } => {
+                client
+                    .run(FileEof {
+                        path,
+                        size,
+                        create_if_missing: create,
+                    })
+                    .await?;
+            }
+        },
         Command::Altaddr => {
             let addr = client.run(AltAddr).await?;
             println!("{addr}");
@@ -1520,66 +1656,6 @@ where
                     clear,
                 })
                 .await?;
-        }
-        Command::Fileeof { path, size, create } => {
-            client
-                .run(FileEof {
-                    path,
-                    size,
-                    create_if_missing: create,
-                })
-                .await?;
-        }
-        Command::Put { local, remote } => {
-            let metadata = std::fs::metadata(&local)
-                .map_err(Error::from)
-                .into_report()
-                .attach_with(|| format!("stat local file {local:?}"))?;
-            let size = metadata.len();
-            let mut file = tokio::fs::File::open(&local)
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach_with(|| format!("opening local file {local:?}"))?;
-            let upload = client
-                .send_file(&remote, FileUploadKind::Create { size })
-                .await?;
-            let bar = ui.progress(size, "upload");
-            let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
-            let mut tracked = ProgressRead::new(compat, bar.clone());
-            upload.copy_from(&mut tracked).await?;
-            bar.finish_and_clear();
-            eprintln!("{} {size} bytes to {remote}", ok_tag("uploaded"));
-        }
-        Command::Writeto {
-            local,
-            remote,
-            offset,
-            length,
-        } => {
-            let mut file = tokio::fs::File::open(&local)
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach_with(|| format!("opening local file {local:?}"))?;
-            let upload = client
-                .send_file(
-                    &remote,
-                    FileUploadKind::WriteAt {
-                        offset,
-                        size: length,
-                    },
-                )
-                .await?;
-            let bar = ui.progress(length, "write");
-            let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
-            let mut tracked = ProgressRead::new(compat, bar.clone());
-            upload.copy_from(&mut tracked).await?;
-            bar.finish_and_clear();
-            eprintln!(
-                "{} {length} bytes at offset {offset} in {remote}",
-                ok_tag("wrote")
-            );
         }
         Command::Screenshot { output, raw } => {
             let shot = client.screenshot().await?;
@@ -1949,7 +2025,7 @@ async fn run_capture(
         .into_report()
         .attach_with(|| format!("creating local output dir {output_dir}"))?;
 
-    // ── Notify channel (2nd connection) ─────────────────────────────
+    // Notify channel (2nd connection).
     // Capture file-creation and capture-end are async; the handler
     // only signals completion on the notify channel. Subscribe first
     // so no events are missed.
@@ -1981,7 +2057,7 @@ async fn run_capture(
         }
     });
 
-    // ── Command channel (main connection) ───────────────────────────
+    // Command channel (main connection).
     let cmd_transport = connect_target_timeout(target, conn_timeout).await?;
     let mut client = xeedee::Client::new(cmd_transport).read_banner().await?;
 

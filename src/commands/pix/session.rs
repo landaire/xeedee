@@ -86,13 +86,13 @@ pub enum PixError {
 /// and title-emitted capture notifications arrive via the same stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notification {
-    // ─── xbmovie / capture (emitted by the title) ────────────────────
+    // xbmovie / capture (emitted by the title).
     /// `PIX!{CaptureFileCreationEnded}<index>` -- segment done.
     CaptureFileCreationEnded { index: u32 },
     /// `PIX!{CaptureEnded}` -- whole session finished.
     CaptureEnded,
 
-    // ─── PIX profiler (emitted by xbdm's pixcmd subsystem) ───────────
+    // PIX profiler (emitted by xbdm's pixcmd subsystem).
     /// `PIX!MovieData ...`.
     MovieData(String),
     /// `PIX!Resource <name>`.
@@ -164,8 +164,6 @@ impl Notification {
     }
 }
 
-// ─── pixcmd (profiler) ───────────────────────────────────────────────
-
 /// Thin wrapper over `pixcmd <subcommand>` for driving the PIX
 /// profiler. Subcommands take positional `u32` args. Call [`PixCmd::raw`]
 /// with the tokens you want to send verbatim.
@@ -198,8 +196,6 @@ where
         self.client.send_raw(&wire).await
     }
 }
-
-// ─── PIX!{Token} (xbmovie video capture) ─────────────────────────────
 
 /// Bound session around a connected client that drives the
 /// `PIX!{Token}` capture protocol implemented by the running title.
