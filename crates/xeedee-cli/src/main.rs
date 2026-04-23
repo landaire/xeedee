@@ -959,7 +959,7 @@ async fn run_nand_dump(
     // Bypass the stat-based directory check -- xbdm serves the raw
     // NAND image when `FLASH:\` is getfile'd even though stat reports
     // it as a directory.
-    let (copied, total) = download_single_file(
+    let DownloadResult { copied, total } = download_single_file(
         &mut dl_client,
         "FLASH:\\",
         &output_path,
@@ -1238,7 +1238,7 @@ where
                         }
                     };
                     let output_path = resolve_get_output(&remote, output.as_deref())?;
-                    let (copied, total) =
+                    let DownloadResult { copied, total } =
                         download_single_file(&mut client, &remote, &output_path, range, ui).await?;
                     eprintln!(
                         "{} {copied} bytes ({total} declared) to {}",
@@ -1782,13 +1782,20 @@ struct RecursiveGetStats {
     bytes: u64,
 }
 
+struct DownloadResult {
+    /// Bytes actually streamed onto disk.
+    copied: u64,
+    /// Total length declared by the remote in the `getfile` prefix header.
+    total: u64,
+}
+
 async fn download_single_file<T>(
     client: &mut Client<T, xeedee::Connected>,
     remote: &str,
     output_path: &std::path::Path,
     range: GetFileRange,
     ui: UiCtx,
-) -> Result<(u64, u64), rootcause::Report<Error>>
+) -> Result<DownloadResult, rootcause::Report<Error>>
 where
     T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
 {
@@ -1804,7 +1811,7 @@ where
     let mut tracked = ProgressWrite::new(compat, bar.clone());
     let copied = download.copy_into(&mut tracked).await?;
     bar.finish_and_clear();
-    Ok((copied, total))
+    Ok(DownloadResult { copied, total })
 }
 
 async fn download_dir_recursive<T>(
@@ -1837,7 +1844,7 @@ where
             ))
             .await?;
         } else {
-            let (copied, _total) = download_single_file(
+            let DownloadResult { copied, .. } = download_single_file(
                 client,
                 &child_remote,
                 &child_local,
@@ -2006,6 +2013,7 @@ where
 }
 
 #[cfg(feature = "capture")]
+#[allow(clippy::too_many_arguments)]
 async fn run_capture(
     target: &Target,
     conn_timeout: Duration,
@@ -2061,7 +2069,10 @@ async fn run_capture(
     let cmd_transport = connect_target_timeout(target, conn_timeout).await?;
     let mut client = xeedee::Client::new(cmd_transport).read_banner().await?;
 
-    let (mut session, handler_detected) = CaptureSession::connect(&mut client).await?;
+    let xeedee::commands::pix::ConnectOutcome {
+        mut session,
+        handler_detected,
+    } = CaptureSession::connect(&mut client).await?;
     if handler_detected {
         eprintln!(
             "{} PIX handler responded to {{Connect}}",
@@ -2197,7 +2208,11 @@ async fn run_capture(
     // list the parent directory in DOS form and match by basename
     // stem -- this works regardless of how we sent the path to the
     // PIX handler.
-    let (parent_dir_dos, stem, ext) = split_capture_remote(&remote);
+    let CaptureRemotePath {
+        parent: parent_dir_dos,
+        stem,
+        ext,
+    } = split_capture_remote(&remote);
     eprintln!(
         "{} scanning {parent_dir_dos} for segments (stem={stem:?}, ext={ext:?})",
         ok_tag("looking"),
@@ -2347,7 +2362,18 @@ async fn run_capture(
 /// the `DEVKIT` drive on partition 1 when in NT form; any other
 /// layout should supply a DOS-form path directly.
 #[cfg(feature = "capture")]
-fn split_capture_remote(remote: &str) -> (String, String, String) {
+#[derive(Debug)]
+struct CaptureRemotePath {
+    /// DOS-form directory, always ending in `\` (e.g. `DEVKIT:\`).
+    parent: String,
+    /// Filename stem, without extension.
+    stem: String,
+    /// Extension with leading `.` (e.g. `.xbm`), or empty if no dot.
+    ext: String,
+}
+
+#[cfg(feature = "capture")]
+fn split_capture_remote(remote: &str) -> CaptureRemotePath {
     let nt_prefix = r"\Device\Harddisk0\Partition1\";
     let dos_form = if let Some(rest) = remote.strip_prefix(nt_prefix) {
         // Rest looks like `DEVKIT\foo.xbm`; first `\` becomes `:\`.
@@ -2365,7 +2391,11 @@ fn split_capture_remote(remote: &str) -> (String, String, String) {
         Some(dot) => (&name[..dot], &name[dot..]),
         None => (name, ""),
     };
-    (parent.to_owned(), stem.to_owned(), ext.to_owned())
+    CaptureRemotePath {
+        parent: parent.to_owned(),
+        stem: stem.to_owned(),
+        ext: ext.to_owned(),
+    }
 }
 
 #[cfg(feature = "capture")]
@@ -3081,6 +3111,7 @@ fn join_path(parent: &str, child: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn walk<T>(
     client: &mut Client<T, xeedee::Connected>,
     dir: &str,
@@ -3327,11 +3358,12 @@ fn write_capture(
 
 #[cfg(all(test, feature = "capture"))]
 mod capture_tests {
+    use super::CaptureRemotePath;
     use super::split_capture_remote;
 
     #[test]
     fn splits_nt_device_path() {
-        let (parent, stem, ext) =
+        let CaptureRemotePath { parent, stem, ext } =
             split_capture_remote(r"\Device\Harddisk0\Partition1\DEVKIT\foo.xbm");
         assert_eq!(parent, r"DEVKIT:\");
         assert_eq!(stem, "foo");
@@ -3340,7 +3372,7 @@ mod capture_tests {
 
     #[test]
     fn splits_dos_path_unchanged() {
-        let (parent, stem, ext) = split_capture_remote(r"DEVKIT:\bar.xbm");
+        let CaptureRemotePath { parent, stem, ext } = split_capture_remote(r"DEVKIT:\bar.xbm");
         assert_eq!(parent, r"DEVKIT:\");
         assert_eq!(stem, "bar");
         assert_eq!(ext, ".xbm");
@@ -3348,7 +3380,7 @@ mod capture_tests {
 
     #[test]
     fn splits_nt_nested() {
-        let (parent, stem, ext) =
+        let CaptureRemotePath { parent, stem, ext } =
             split_capture_remote(r"\Device\Harddisk0\Partition1\DEVKIT\sub\baz.xbm");
         assert_eq!(parent, r"DEVKIT:\sub\");
         assert_eq!(stem, "baz");

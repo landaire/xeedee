@@ -53,7 +53,10 @@ impl<'a> KvLine<'a> {
 
 pub fn parse_kv_line(line: &str) -> KvLine<'_> {
     match run_parse(kv_tokens, line, ParseError::UnrecognizedShape) {
-        Ok((pairs, flags)) => KvLine { pairs, flags },
+        Ok(tokens) => KvLine {
+            pairs: tokens.pairs,
+            flags: tokens.flags,
+        },
         Err(_) => KvLine {
             pairs: Vec::new(),
             flags: Vec::new(),

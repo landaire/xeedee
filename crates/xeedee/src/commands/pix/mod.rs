@@ -34,6 +34,7 @@ pub use profile::CaptureProfile;
 pub use profile::HdmiFrameRate;
 pub use profile::Resolution;
 pub use session::CaptureSession;
+pub use session::ConnectOutcome;
 pub use session::Notification;
 pub use session::PIX_VERSION;
 pub use session::PixCmd;

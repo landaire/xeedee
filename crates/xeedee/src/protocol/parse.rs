@@ -18,7 +18,7 @@ pub type Input<'a> = &'a str;
 pub fn three_digit_code(input: &mut Input<'_>) -> Result<u16, ErrMode<ContextError>> {
     digit1
         .verify(|s: &str| s.len() == 3)
-        .try_map(|s: &str| u16::from_str_radix(s, 10))
+        .try_map(|s: &str| s.parse::<u16>())
         .parse_next(input)
 }
 
@@ -73,12 +73,17 @@ where
     parser(&mut cursor).map_err(|_| on_fail)
 }
 
+/// Output of [`kv_tokens`]: the `KEY=VALUE` pairs and the bare flag tokens,
+/// each preserved in source order within their respective lists.
+#[derive(Debug, Default)]
+pub struct KvTokens<'a> {
+    pub pairs: Vec<(&'a str, KvValue<'a>)>,
+    pub flags: Vec<&'a str>,
+}
+
 /// Consume whitespace-separated `KEY=VALUE` pairs and bare flag tokens.
-pub fn kv_tokens<'a>(
-    input: &mut Input<'a>,
-) -> Result<(Vec<(&'a str, KvValue<'a>)>, Vec<&'a str>), ErrMode<ContextError>> {
-    let mut pairs: Vec<(&'a str, KvValue<'a>)> = Vec::new();
-    let mut flags: Vec<&'a str> = Vec::new();
+pub fn kv_tokens<'a>(input: &mut Input<'a>) -> Result<KvTokens<'a>, ErrMode<ContextError>> {
+    let mut out = KvTokens::default();
     loop {
         let _ = winnow::ascii::space0.parse_next(input)?;
         if input.is_empty() {
@@ -89,12 +94,12 @@ pub fn kv_tokens<'a>(
         match opt('=').parse_next(input)? {
             Some(_) => {
                 let value = kv_value.parse_next(input)?;
-                pairs.push((key, value));
+                out.pairs.push((key, value));
             }
-            None => flags.push(key),
+            None => out.flags.push(key),
         }
     }
-    Ok((pairs, flags))
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,13 +176,13 @@ mod tests {
     #[test]
     fn kv_tokens_parses_mixed() {
         let mut input = r#"NAME="e:\foo" ADDR=0x80000000 RUNNING"#;
-        let (pairs, flags) = kv_tokens.parse_next(&mut input).unwrap();
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(pairs[0].0, "NAME");
-        assert_eq!(pairs[0].1.as_str(), r"e:\foo");
-        assert_eq!(pairs[1].0, "ADDR");
-        assert_eq!(pairs[1].1.as_str(), "0x80000000");
-        assert_eq!(flags, vec!["RUNNING"]);
+        let tokens = kv_tokens.parse_next(&mut input).unwrap();
+        assert_eq!(tokens.pairs.len(), 2);
+        assert_eq!(tokens.pairs[0].0, "NAME");
+        assert_eq!(tokens.pairs[0].1.as_str(), r"e:\foo");
+        assert_eq!(tokens.pairs[1].0, "ADDR");
+        assert_eq!(tokens.pairs[1].1.as_str(), "0x80000000");
+        assert_eq!(tokens.flags, vec!["RUNNING"]);
     }
 
     #[test]

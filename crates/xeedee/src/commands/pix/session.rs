@@ -209,6 +209,16 @@ impl<'a, T> core::fmt::Debug for CaptureSession<'a, T> {
     }
 }
 
+/// Outcome of [`CaptureSession::connect`]: a session plus whether the
+/// `{Connect}` reply looked like a real PIX handler (`head` contained
+/// `PIX`) or a plain xbdm no-op (`200- OK`). Callers can inspect
+/// `handler_detected` and decide whether to proceed.
+#[derive(Debug)]
+pub struct ConnectOutcome<'a, T> {
+    pub session: CaptureSession<'a, T>,
+    pub handler_detected: bool,
+}
+
 impl<'a, T> CaptureSession<'a, T>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -217,13 +227,10 @@ where
     /// `{Version} <ver>`.
     ///
     /// Returns a session regardless of whether a title was actually
-    /// registered as the PIX handler; the `handler_detected` field on
-    /// the returned session says whether the `{Connect}` reply looked
-    /// like a real PIX handler (`head` contained `PIX`) or a plain
-    /// xbdm no-op (`200- OK`). Callers can decide whether to proceed.
+    /// registered as the PIX handler.
     pub async fn connect(
         client: &'a mut Client<T, Connected>,
-    ) -> Result<(Self, bool), rootcause::Report<Error>> {
+    ) -> Result<ConnectOutcome<'a, T>, rootcause::Report<Error>> {
         let mut session = CaptureSession { client };
         let resp = session.send_raw("{Connect}").await?;
         let handler_detected = matches!(
@@ -233,7 +240,10 @@ where
         session
             .send_raw(&format!("{{Version}} {}", PIX_VERSION))
             .await?;
-        Ok((session, handler_detected))
+        Ok(ConnectOutcome {
+            session,
+            handler_detected,
+        })
     }
 
     /// Cap the per-segment file size in megabytes. xbmovie's default

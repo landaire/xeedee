@@ -54,10 +54,9 @@ fn main() {
                     operands.first().copied(),
                     operands.get(1).copied(),
                     operands.get(2).and_then(|a| uimm_of(a)),
-                ) {
-                    if ra.0 == 0 {
-                        lis_state.insert(rt.0, (address, uimm));
-                    }
+                ) && ra.0 == 0
+                {
+                    lis_state.insert(rt.0, (address, uimm));
                 }
             }
             Opcode::Addi => {
@@ -65,18 +64,16 @@ fn main() {
                     operands.first().copied(),
                     operands.get(1).copied(),
                     operands.get(2).and_then(|a| simm_of(a)),
-                ) {
-                    if ra.0 != 0
-                        && let Some(&(lis_addr, hi)) = lis_state.get(&ra.0)
-                    {
-                        let resolved = combine(hi, simm);
-                        annotation = format!("  # addr {resolved:#010x} (lis @ {lis_addr:#010x})");
-                        // The target register rT is now holding the
-                        // resolved address, so track it for chained
-                        // references.
-                        lis_state.insert(rt.0, (lis_addr, hi));
-                        let _ = lis_addr; // silence for older rustc
-                    }
+                ) && ra.0 != 0
+                    && let Some(&(lis_addr, hi)) = lis_state.get(&ra.0)
+                {
+                    let resolved = combine(hi, simm);
+                    annotation = format!("  # addr {resolved:#010x} (lis @ {lis_addr:#010x})");
+                    // The target register rT is now holding the
+                    // resolved address, so track it for chained
+                    // references.
+                    lis_state.insert(rt.0, (lis_addr, hi));
+                    let _ = lis_addr; // silence for older rustc
                 }
             }
             Opcode::B => {
