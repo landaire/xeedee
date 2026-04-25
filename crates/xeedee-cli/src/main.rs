@@ -1009,571 +1009,704 @@ async fn drive_connected<T>(
 where
     T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
 {
+    // Each arm wraps its body in `Box::pin(async move { ... }).await?` so the
+    // arm's state machine and resume frame live on the heap. Without this,
+    // the giant `match cmd` collapses into a single async state machine whose
+    // resume function overflows the main thread's 1 MiB stack on Windows in
+    // debug builds. The per-arm `let client = &mut client;` reborrow lets the
+    // `async move` block consume a mutable borrow without taking ownership of
+    // the connection (which we still need for `client.bye()` after the match).
     match cmd {
         Command::Discover { .. } | Command::Resolve { .. } => unreachable!(),
         Command::Ping => {
             println!("connected");
         }
         Command::Dbgname { set } => {
-            let name = client
-                .run(match set {
-                    Some(value) => DbgName::Set(value),
-                    None => DbgName::Get,
-                })
-                .await?;
-            println!("{name}");
+            let client = &mut client;
+            Box::pin(async move {
+                let name = client
+                    .run(match set {
+                        Some(value) => DbgName::Set(value),
+                        None => DbgName::Get,
+                    })
+                    .await?;
+                println!("{name}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Systime => {
-            let result = client.run(SysTime).await?;
-            println!("{}", ui.fmt_time(result.file_time));
+            let client = &mut client;
+            Box::pin(async move {
+                let result = client.run(SysTime).await?;
+                println!("{}", ui.fmt_time(result.file_time));
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Dmversion => {
-            let version = client.run(DmVersion).await?;
-            println!("{version}");
+            let client = &mut client;
+            Box::pin(async move {
+                let version = client.run(DmVersion).await?;
+                println!("{version}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Consoletype => {
-            let kind = client.run(GetConsoleType).await?;
-            println!("{kind:?}");
+            let client = &mut client;
+            Box::pin(async move {
+                let kind = client.run(GetConsoleType).await?;
+                println!("{kind:?}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Consolefeatures => {
-            let features = client.run(GetConsoleFeatures).await?;
-            for flag in features.flags {
-                println!("{flag}");
-            }
+            let client = &mut client;
+            Box::pin(async move {
+                let features = client.run(GetConsoleFeatures).await?;
+                for flag in features.flags {
+                    println!("{flag}");
+                }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Drivelist => {
-            let drives = client.run(DriveList).await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row<'a> {
-                    #[tabled(rename = "drive")]
-                    name: &'a str,
+            let client = &mut client;
+            Box::pin(async move {
+                let drives = client.run(DriveList).await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row<'a> {
+                        #[tabled(rename = "drive")]
+                        name: &'a str,
+                    }
+                    let rows: Vec<Row<'_>> = drives.iter().map(|d| Row { name: d }).collect();
+                    print_colored_table(&heading_label("drives", &ui), rows, &ui);
+                } else {
+                    for d in drives {
+                        println!("{d}");
+                    }
                 }
-                let rows: Vec<Row<'_>> = drives.iter().map(|d| Row { name: d }).collect();
-                print_colored_table(&heading_label("drives", &ui), rows, &ui);
-            } else {
-                for d in drives {
-                    println!("{d}");
-                }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Df { drive } => {
-            let space = client
-                .run(DriveFreeSpace {
-                    drive: drive.clone(),
-                })
-                .await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    #[tabled(rename = "metric")]
-                    key: String,
-                    size: String,
+            let client = &mut client;
+            Box::pin(async move {
+                let space = client
+                    .run(DriveFreeSpace {
+                        drive: drive.clone(),
+                    })
+                    .await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        #[tabled(rename = "metric")]
+                        key: String,
+                        size: String,
+                    }
+                    let rows = vec![
+                        Row {
+                            key: "free_to_caller".into(),
+                            size: ui.fmt_bytes(space.free_to_caller_bytes),
+                        },
+                        Row {
+                            key: "total".into(),
+                            size: ui.fmt_bytes(space.total_bytes),
+                        },
+                        Row {
+                            key: "total_free".into(),
+                            size: ui.fmt_bytes(space.total_free_bytes),
+                        },
+                    ];
+                    print_colored_table(&heading_label(&format!("df {drive}"), &ui), rows, &ui);
+                } else {
+                    println!(
+                        "free_to_caller={} total={} total_free={}",
+                        ui.fmt_bytes(space.free_to_caller_bytes),
+                        ui.fmt_bytes(space.total_bytes),
+                        ui.fmt_bytes(space.total_free_bytes)
+                    );
                 }
-                let rows = vec![
-                    Row {
-                        key: "free_to_caller".into(),
-                        size: ui.fmt_bytes(space.free_to_caller_bytes),
-                    },
-                    Row {
-                        key: "total".into(),
-                        size: ui.fmt_bytes(space.total_bytes),
-                    },
-                    Row {
-                        key: "total_free".into(),
-                        size: ui.fmt_bytes(space.total_free_bytes),
-                    },
-                ];
-                print_colored_table(&heading_label(&format!("df {drive}"), &ui), rows, &ui);
-            } else {
-                println!(
-                    "free_to_caller={} total={} total_free={}",
-                    ui.fmt_bytes(space.free_to_caller_bytes),
-                    ui.fmt_bytes(space.total_bytes),
-                    ui.fmt_bytes(space.total_free_bytes)
-                );
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
-        Command::File(fc) => match fc {
-            FileCommand::Tree {
-                path,
-                max_depth,
-                dirs_only,
-            } => {
-                run_tree(&mut client, path, max_depth, !dirs_only, ui).await?;
-            }
-            FileCommand::Ls {
-                path,
-                sort_by,
-                sort_order,
-            } => {
-                let mut entries = client.run(DirList { path: path.clone() }).await?;
-                sort_dir_entries(&mut entries, sort_by, sort_order);
+        Command::File(fc) => {
+            let client = &mut client;
+            Box::pin(async move {
+                match fc {
+                    FileCommand::Tree {
+                        path,
+                        max_depth,
+                        dirs_only,
+                    } => {
+                        run_tree(client, path, max_depth, !dirs_only, ui).await?;
+                    }
+                    FileCommand::Ls {
+                        path,
+                        sort_by,
+                        sort_order,
+                    } => {
+                        let mut entries = client.run(DirList { path: path.clone() }).await?;
+                        sort_dir_entries(&mut entries, sort_by, sort_order);
+                        if ui.pretty() {
+                            #[derive(Tabled)]
+                            struct Row {
+                                name: String,
+                                size: String,
+                                kind: String,
+                                #[tabled(rename = "changed")]
+                                changed: String,
+                            }
+                            let rows: Vec<Row> = entries
+                                .iter()
+                                .map(|e| Row {
+                                    name: e.name.clone(),
+                                    size: if e.is_directory {
+                                        "-".into()
+                                    } else {
+                                        ui.fmt_bytes(e.size)
+                                    },
+                                    kind: if e.is_directory {
+                                        "DIR".into()
+                                    } else {
+                                        "FILE".into()
+                                    },
+                                    changed: ui.fmt_time(e.change_time),
+                                })
+                                .collect();
+                            print_colored_table(
+                                &heading_label(&format!("ls {path}"), &ui),
+                                rows,
+                                &ui,
+                            );
+                        } else {
+                            for entry in entries {
+                                println!(
+                                    "{}\t{}\t{}\t{}",
+                                    entry.name,
+                                    if entry.is_directory {
+                                        "-".into()
+                                    } else {
+                                        ui.fmt_bytes(entry.size)
+                                    },
+                                    if entry.is_directory { "DIR" } else { "FILE" },
+                                    ui.fmt_time(entry.change_time),
+                                );
+                            }
+                        }
+                    }
+                    FileCommand::Stat { path } => {
+                        let attrs = client.run(GetFileAttributes { path }).await?;
+                        println!(
+                            "size={} created={} changed={} is_directory={}",
+                            if attrs.is_directory {
+                                "-".into()
+                            } else {
+                                ui.fmt_bytes(attrs.size)
+                            },
+                            ui.fmt_time(attrs.create_time),
+                            ui.fmt_time(attrs.change_time),
+                            attrs.is_directory,
+                        );
+                    }
+                    FileCommand::Mkdir { path } => {
+                        client.run(MakeDirectory { path }).await?;
+                    }
+                    FileCommand::Rm { path, dir } => {
+                        client
+                            .run(Delete {
+                                path,
+                                is_directory: dir,
+                            })
+                            .await?;
+                    }
+                    FileCommand::Mv { from, to } => {
+                        client.run(Rename { from, to }).await?;
+                    }
+                    FileCommand::Get {
+                        remote,
+                        output,
+                        recursive,
+                        offset,
+                        size,
+                    } => {
+                        let attrs = client
+                            .run(GetFileAttributes {
+                                path: remote.clone(),
+                            })
+                            .await
+                            .ok();
+                        let is_directory = attrs.as_ref().map(|a| a.is_directory).unwrap_or(false);
+
+                        if is_directory {
+                            if !recursive {
+                                return Err(rootcause::Report::new(Error::from(
+                                    xeedee::error::ArgumentError::EmptyFilename,
+                                ))
+                                .attach(format!(
+                                    "{remote:?} is a directory; pass -r for recursive download"
+                                )));
+                            }
+                            if offset.is_some() || size.is_some() {
+                                return Err(rootcause::Report::new(Error::from(
+                                    xeedee::error::ArgumentError::EmptyFilename,
+                                ))
+                                .attach(
+                                    "--offset / --size are file-mode only, not valid with -r",
+                                ));
+                            }
+                            let root = resolve_get_dir_output(&remote, output.as_deref())?;
+                            tokio::fs::create_dir_all(&root)
+                                .await
+                                .map_err(Error::from)
+                                .into_report()
+                                .attach_with(|| {
+                                    format!("creating local directory {}", root.display())
+                                })?;
+                            let mut stats = RecursiveGetStats::default();
+                            download_dir_recursive(client, &remote, &root, ui, &mut stats).await?;
+                            eprintln!(
+                                "{} {} file{} ({} total) under {}",
+                                ok_tag("downloaded"),
+                                stats.files,
+                                if stats.files == 1 { "" } else { "s" },
+                                ui.fmt_bytes(stats.bytes),
+                                root.display()
+                            );
+                        } else {
+                            let range = match (offset, size) {
+                                (Some(offset), Some(size)) => GetFileRange::Range { offset, size },
+                                (None, None) => GetFileRange::WholeFile,
+                                _ => {
+                                    return Err(rootcause::Report::new(Error::from(
+                                        xeedee::error::ArgumentError::EmptyFilename,
+                                    ))
+                                    .attach("--offset and --size must be provided together"));
+                                }
+                            };
+                            let output_path = resolve_get_output(&remote, output.as_deref())?;
+                            let DownloadResult { copied, total } =
+                                download_single_file(client, &remote, &output_path, range, ui)
+                                    .await?;
+                            eprintln!(
+                                "{} {copied} bytes ({total} declared) to {}",
+                                ok_tag("downloaded"),
+                                output_path.display()
+                            );
+                        }
+                    }
+                    FileCommand::Put { local, remote } => {
+                        let metadata = std::fs::metadata(&local)
+                            .map_err(Error::from)
+                            .into_report()
+                            .attach_with(|| format!("stat local file {local:?}"))?;
+                        let size = metadata.len();
+                        let mut file = tokio::fs::File::open(&local)
+                            .await
+                            .map_err(Error::from)
+                            .into_report()
+                            .attach_with(|| format!("opening local file {local:?}"))?;
+                        let upload = client
+                            .send_file(&remote, FileUploadKind::Create { size })
+                            .await?;
+                        let bar = ui.progress(size, "upload");
+                        let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
+                        let mut tracked = ProgressRead::new(compat, bar.clone());
+                        upload.copy_from(&mut tracked).await?;
+                        bar.finish_and_clear();
+                        eprintln!("{} {size} bytes to {remote}", ok_tag("uploaded"));
+                    }
+                    FileCommand::Writeto {
+                        local,
+                        remote,
+                        offset,
+                        length,
+                    } => {
+                        let mut file = tokio::fs::File::open(&local)
+                            .await
+                            .map_err(Error::from)
+                            .into_report()
+                            .attach_with(|| format!("opening local file {local:?}"))?;
+                        let upload = client
+                            .send_file(
+                                &remote,
+                                FileUploadKind::WriteAt {
+                                    offset,
+                                    size: length,
+                                },
+                            )
+                            .await?;
+                        let bar = ui.progress(length, "write");
+                        let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
+                        let mut tracked = ProgressRead::new(compat, bar.clone());
+                        upload.copy_from(&mut tracked).await?;
+                        bar.finish_and_clear();
+                        eprintln!(
+                            "{} {length} bytes at offset {offset} in {remote}",
+                            ok_tag("wrote")
+                        );
+                    }
+                    FileCommand::Fileeof { path, size, create } => {
+                        client
+                            .run(FileEof {
+                                path,
+                                size,
+                                create_if_missing: create,
+                            })
+                            .await?;
+                    }
+                }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
+        Command::Altaddr => {
+            let client = &mut client;
+            Box::pin(async move {
+                let addr = client.run(AltAddr).await?;
+                println!("{addr}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
+        Command::Getpid => {
+            let client = &mut client;
+            Box::pin(async move {
+                let pid = client.run(GetPid).await?;
+                println!("{pid:#010x}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
+        Command::Consolemem => {
+            let client = &mut client;
+            Box::pin(async move {
+                let mem = client.run(GetConsoleMem).await?;
+                println!("class={:#04x}", mem.class);
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
+        Command::Netaddrs => {
+            let client = &mut client;
+            Box::pin(async move {
+                let na = client.run(GetNetAddrs).await?;
+                println!("name={}", na.name);
+                println!("debug={}", hex_dump(&na.debug));
+                println!("title={}", hex_dump(&na.title));
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
+        Command::Modules => {
+            let client = &mut client;
+            Box::pin(async move {
+                let mods = client.run(Modules).await?;
                 if ui.pretty() {
                     #[derive(Tabled)]
                     struct Row {
                         name: String,
+                        base: String,
+                        end: String,
                         size: String,
-                        kind: String,
-                        #[tabled(rename = "changed")]
-                        changed: String,
+                        check: String,
+                        #[tabled(rename = "dll")]
+                        dll: &'static str,
+                        osize: String,
                     }
-                    let rows: Vec<Row> = entries
+                    let rows: Vec<Row> = mods
                         .iter()
-                        .map(|e| Row {
-                            name: e.name.clone(),
-                            size: if e.is_directory {
-                                "-".into()
-                            } else {
-                                ui.fmt_bytes(e.size)
-                            },
-                            kind: if e.is_directory {
-                                "DIR".into()
-                            } else {
-                                "FILE".into()
-                            },
-                            changed: ui.fmt_time(e.change_time),
+                        .map(|m| Row {
+                            name: m.name.clone(),
+                            base: format!("{:#010x}", m.base),
+                            end: format!("{:#010x}", m.base.wrapping_add(m.size)),
+                            size: format!("{:#010x}", m.size),
+                            check: format!("{:#010x}", m.checksum),
+                            dll: if m.is_dll { "yes" } else { "no" },
+                            osize: format!("{:#010x}", m.osize),
                         })
                         .collect();
-                    print_colored_table(&heading_label(&format!("ls {path}"), &ui), rows, &ui);
+                    print_colored_table(&heading_label("modules", &ui), rows, &ui);
                 } else {
-                    for entry in entries {
+                    for m in mods {
                         println!(
-                            "{}\t{}\t{}\t{}",
-                            entry.name,
-                            if entry.is_directory {
-                                "-".into()
-                            } else {
-                                ui.fmt_bytes(entry.size)
-                            },
-                            if entry.is_directory { "DIR" } else { "FILE" },
-                            ui.fmt_time(entry.change_time),
+                            "{}\t{:#010x}\t{:#010x}\t{:#010x}\t{:#010x}\t{}\t{:#010x}",
+                            m.name,
+                            m.base,
+                            m.base.wrapping_add(m.size),
+                            m.size,
+                            m.checksum,
+                            m.is_dll,
+                            m.osize
                         );
                     }
                 }
-            }
-            FileCommand::Stat { path } => {
-                let attrs = client.run(GetFileAttributes { path }).await?;
-                println!(
-                    "size={} created={} changed={} is_directory={}",
-                    if attrs.is_directory {
-                        "-".into()
-                    } else {
-                        ui.fmt_bytes(attrs.size)
-                    },
-                    ui.fmt_time(attrs.create_time),
-                    ui.fmt_time(attrs.change_time),
-                    attrs.is_directory,
-                );
-            }
-            FileCommand::Mkdir { path } => {
-                client.run(MakeDirectory { path }).await?;
-            }
-            FileCommand::Rm { path, dir } => {
-                client
-                    .run(Delete {
-                        path,
-                        is_directory: dir,
-                    })
-                    .await?;
-            }
-            FileCommand::Mv { from, to } => {
-                client.run(Rename { from, to }).await?;
-            }
-            FileCommand::Get {
-                remote,
-                output,
-                recursive,
-                offset,
-                size,
-            } => {
-                let attrs = client
-                    .run(GetFileAttributes {
-                        path: remote.clone(),
-                    })
-                    .await
-                    .ok();
-                let is_directory = attrs.as_ref().map(|a| a.is_directory).unwrap_or(false);
-
-                if is_directory {
-                    if !recursive {
-                        return Err(rootcause::Report::new(Error::from(
-                            xeedee::error::ArgumentError::EmptyFilename,
-                        ))
-                        .attach(format!(
-                            "{remote:?} is a directory; pass -r for recursive download"
-                        )));
-                    }
-                    if offset.is_some() || size.is_some() {
-                        return Err(rootcause::Report::new(Error::from(
-                            xeedee::error::ArgumentError::EmptyFilename,
-                        ))
-                        .attach("--offset / --size are file-mode only, not valid with -r"));
-                    }
-                    let root = resolve_get_dir_output(&remote, output.as_deref())?;
-                    tokio::fs::create_dir_all(&root)
-                        .await
-                        .map_err(Error::from)
-                        .into_report()
-                        .attach_with(|| format!("creating local directory {}", root.display()))?;
-                    let mut stats = RecursiveGetStats::default();
-                    download_dir_recursive(&mut client, &remote, &root, ui, &mut stats).await?;
-                    eprintln!(
-                        "{} {} file{} ({} total) under {}",
-                        ok_tag("downloaded"),
-                        stats.files,
-                        if stats.files == 1 { "" } else { "s" },
-                        ui.fmt_bytes(stats.bytes),
-                        root.display()
-                    );
-                } else {
-                    let range = match (offset, size) {
-                        (Some(offset), Some(size)) => GetFileRange::Range { offset, size },
-                        (None, None) => GetFileRange::WholeFile,
-                        _ => {
-                            return Err(rootcause::Report::new(Error::from(
-                                xeedee::error::ArgumentError::EmptyFilename,
-                            ))
-                            .attach("--offset and --size must be provided together"));
-                        }
-                    };
-                    let output_path = resolve_get_output(&remote, output.as_deref())?;
-                    let DownloadResult { copied, total } =
-                        download_single_file(&mut client, &remote, &output_path, range, ui).await?;
-                    eprintln!(
-                        "{} {copied} bytes ({total} declared) to {}",
-                        ok_tag("downloaded"),
-                        output_path.display()
-                    );
-                }
-            }
-            FileCommand::Put { local, remote } => {
-                let metadata = std::fs::metadata(&local)
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach_with(|| format!("stat local file {local:?}"))?;
-                let size = metadata.len();
-                let mut file = tokio::fs::File::open(&local)
-                    .await
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach_with(|| format!("opening local file {local:?}"))?;
-                let upload = client
-                    .send_file(&remote, FileUploadKind::Create { size })
-                    .await?;
-                let bar = ui.progress(size, "upload");
-                let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
-                let mut tracked = ProgressRead::new(compat, bar.clone());
-                upload.copy_from(&mut tracked).await?;
-                bar.finish_and_clear();
-                eprintln!("{} {size} bytes to {remote}", ok_tag("uploaded"));
-            }
-            FileCommand::Writeto {
-                local,
-                remote,
-                offset,
-                length,
-            } => {
-                let mut file = tokio::fs::File::open(&local)
-                    .await
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach_with(|| format!("opening local file {local:?}"))?;
-                let upload = client
-                    .send_file(
-                        &remote,
-                        FileUploadKind::WriteAt {
-                            offset,
-                            size: length,
-                        },
-                    )
-                    .await?;
-                let bar = ui.progress(length, "write");
-                let compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(&mut file);
-                let mut tracked = ProgressRead::new(compat, bar.clone());
-                upload.copy_from(&mut tracked).await?;
-                bar.finish_and_clear();
-                eprintln!(
-                    "{} {length} bytes at offset {offset} in {remote}",
-                    ok_tag("wrote")
-                );
-            }
-            FileCommand::Fileeof { path, size, create } => {
-                client
-                    .run(FileEof {
-                        path,
-                        size,
-                        create_if_missing: create,
-                    })
-                    .await?;
-            }
-        },
-        Command::Altaddr => {
-            let addr = client.run(AltAddr).await?;
-            println!("{addr}");
-        }
-        Command::Getpid => {
-            let pid = client.run(GetPid).await?;
-            println!("{pid:#010x}");
-        }
-        Command::Consolemem => {
-            let mem = client.run(GetConsoleMem).await?;
-            println!("class={:#04x}", mem.class);
-        }
-        Command::Netaddrs => {
-            let na = client.run(GetNetAddrs).await?;
-            println!("name={}", na.name);
-            println!("debug={}", hex_dump(&na.debug));
-            println!("title={}", hex_dump(&na.title));
-        }
-        Command::Modules => {
-            let mods = client.run(Modules).await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    name: String,
-                    base: String,
-                    end: String,
-                    size: String,
-                    check: String,
-                    #[tabled(rename = "dll")]
-                    dll: &'static str,
-                    osize: String,
-                }
-                let rows: Vec<Row> = mods
-                    .iter()
-                    .map(|m| Row {
-                        name: m.name.clone(),
-                        base: format!("{:#010x}", m.base),
-                        end: format!("{:#010x}", m.base.wrapping_add(m.size)),
-                        size: format!("{:#010x}", m.size),
-                        check: format!("{:#010x}", m.checksum),
-                        dll: if m.is_dll { "yes" } else { "no" },
-                        osize: format!("{:#010x}", m.osize),
-                    })
-                    .collect();
-                print_colored_table(&heading_label("modules", &ui), rows, &ui);
-            } else {
-                for m in mods {
-                    println!(
-                        "{}\t{:#010x}\t{:#010x}\t{:#010x}\t{:#010x}\t{}\t{:#010x}",
-                        m.name,
-                        m.base,
-                        m.base.wrapping_add(m.size),
-                        m.size,
-                        m.checksum,
-                        m.is_dll,
-                        m.osize
-                    );
-                }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Modsections { module } => {
-            let sections = client
-                .run(ModuleSections {
-                    module: module.clone(),
-                })
-                .await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    name: String,
-                    base: String,
-                    size: String,
-                    idx: u32,
-                    flags: String,
-                    #[tabled(rename = "rwxu")]
-                    perms: String,
-                }
-                let rows: Vec<Row> = sections
-                    .iter()
-                    .map(|s| Row {
-                        name: s.name.clone(),
-                        base: format!("{:#010x}", s.base),
-                        size: format!("{:#010x}", s.size),
-                        idx: s.index,
-                        flags: format!("{:#x}", s.flags.0),
-                        perms: format!(
-                            "{}{}{}{}",
+            let client = &mut client;
+            Box::pin(async move {
+                let sections = client
+                    .run(ModuleSections {
+                        module: module.clone(),
+                    })
+                    .await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        name: String,
+                        base: String,
+                        size: String,
+                        idx: u32,
+                        flags: String,
+                        #[tabled(rename = "rwxu")]
+                        perms: String,
+                    }
+                    let rows: Vec<Row> = sections
+                        .iter()
+                        .map(|s| Row {
+                            name: s.name.clone(),
+                            base: format!("{:#010x}", s.base),
+                            size: format!("{:#010x}", s.size),
+                            idx: s.index,
+                            flags: format!("{:#x}", s.flags.0),
+                            perms: format!(
+                                "{}{}{}{}",
+                                if s.flags.readable() { 'r' } else { '-' },
+                                if s.flags.writable() { 'w' } else { '-' },
+                                if s.flags.executable() { 'x' } else { '-' },
+                                if s.flags.uninitialized() { 'u' } else { '-' },
+                            ),
+                        })
+                        .collect();
+                    print_colored_table(
+                        &heading_label(&format!("modsections {module}"), &ui),
+                        rows,
+                        &ui,
+                    );
+                } else {
+                    for s in sections {
+                        println!(
+                            "{}\t{:#010x}\t{:#010x}\t{}\t{:#x}\t{}{}{}{}",
+                            s.name,
+                            s.base,
+                            s.size,
+                            s.index,
+                            s.flags.0,
                             if s.flags.readable() { 'r' } else { '-' },
                             if s.flags.writable() { 'w' } else { '-' },
                             if s.flags.executable() { 'x' } else { '-' },
                             if s.flags.uninitialized() { 'u' } else { '-' },
-                        ),
-                    })
-                    .collect();
-                print_colored_table(
-                    &heading_label(&format!("modsections {module}"), &ui),
-                    rows,
-                    &ui,
-                );
-            } else {
-                for s in sections {
-                    println!(
-                        "{}\t{:#010x}\t{:#010x}\t{}\t{:#x}\t{}{}{}{}",
-                        s.name,
-                        s.base,
-                        s.size,
-                        s.index,
-                        s.flags.0,
-                        if s.flags.readable() { 'r' } else { '-' },
-                        if s.flags.writable() { 'w' } else { '-' },
-                        if s.flags.executable() { 'x' } else { '-' },
-                        if s.flags.uninitialized() { 'u' } else { '-' },
-                    );
+                        );
+                    }
                 }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Threads => {
-            let tids = client.run(Threads).await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    #[tabled(rename = "thread id")]
-                    id: String,
+            let client = &mut client;
+            Box::pin(async move {
+                let tids = client.run(Threads).await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        #[tabled(rename = "thread id")]
+                        id: String,
+                    }
+                    let rows: Vec<Row> = tids.iter().map(|t| Row { id: format!("{t}") }).collect();
+                    print_colored_table(&heading_label("threads", &ui), rows, &ui);
+                } else {
+                    for t in tids {
+                        println!("{t}");
+                    }
                 }
-                let rows: Vec<Row> = tids.iter().map(|t| Row { id: format!("{t}") }).collect();
-                print_colored_table(&heading_label("threads", &ui), rows, &ui);
-            } else {
-                for t in tids {
-                    println!("{t}");
-                }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Threadinfo { thread } => {
-            let id = parse_thread_id(&thread)?;
-            let info = client.run(ThreadInfo { thread: id }).await?;
-            println!("{info:#?}");
+            let client = &mut client;
+            Box::pin(async move {
+                let id = parse_thread_id(&thread)?;
+                let info = client.run(ThreadInfo { thread: id }).await?;
+                println!("{info:#?}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Xbeinfo { name } => {
-            let cmd = match name {
-                Some(path) => XbeInfo::Named(path),
-                None => XbeInfo::Running,
-            };
-            let info = client.run(cmd).await?;
-            println!("name={}", info.name);
-            println!("timestamp={:#010x}", info.timestamp);
-            println!("checksum={:#010x}", info.checksum);
+            let client = &mut client;
+            Box::pin(async move {
+                let cmd = match name {
+                    Some(path) => XbeInfo::Named(path),
+                    None => XbeInfo::Running,
+                };
+                let info = client.run(cmd).await?;
+                println!("name={}", info.name);
+                println!("timestamp={:#010x}", info.timestamp);
+                println!("checksum={:#010x}", info.checksum);
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Walkmem => {
-            let regions = client.run(WalkMem).await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    base: String,
-                    size: String,
-                    protect: String,
+            let client = &mut client;
+            Box::pin(async move {
+                let regions = client.run(WalkMem).await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        base: String,
+                        size: String,
+                        protect: String,
+                    }
+                    let rows: Vec<Row> = regions
+                        .iter()
+                        .map(|r| Row {
+                            base: format!("{:#010x}", r.base),
+                            size: format!("{:#010x}", r.size),
+                            protect: format!("{:#010x}", r.protect),
+                        })
+                        .collect();
+                    print_colored_table(&heading_label("walkmem", &ui), rows, &ui);
+                } else {
+                    for region in regions {
+                        println!(
+                            "base={:#010x} size={:#010x} protect={:#010x}",
+                            region.base, region.size, region.protect
+                        );
+                    }
                 }
-                let rows: Vec<Row> = regions
-                    .iter()
-                    .map(|r| Row {
-                        base: format!("{:#010x}", r.base),
-                        size: format!("{:#010x}", r.size),
-                        protect: format!("{:#010x}", r.protect),
-                    })
-                    .collect();
-                print_colored_table(&heading_label("walkmem", &ui), rows, &ui);
-            } else {
-                for region in regions {
-                    println!(
-                        "base={:#010x} size={:#010x} protect={:#010x}",
-                        region.base, region.size, region.protect
-                    );
-                }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Getmem { address, length } => {
-            let addr = parse_u32(&address).map_err(|e| attach_hint(e, "--address"))?;
-            let len = parse_u32(&length).map_err(|e| attach_hint(e, "--length"))?;
-            let snap = client
-                .run(GetMem {
-                    address: addr,
-                    length: len,
-                })
-                .await?;
-            print_hex_dump(snap.address, &snap.data, &snap.unmapped_offsets);
+            let client = &mut client;
+            Box::pin(async move {
+                let addr = parse_u32(&address).map_err(|e| attach_hint(e, "--address"))?;
+                let len = parse_u32(&length).map_err(|e| attach_hint(e, "--length"))?;
+                let snap = client
+                    .run(GetMem {
+                        address: addr,
+                        length: len,
+                    })
+                    .await?;
+                print_hex_dump(snap.address, &snap.data, &snap.unmapped_offsets);
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Pclist => {
-            let counters = client.run(PerfCounterList).await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    #[tabled(rename = "type")]
-                    kind: String,
-                    name: String,
+            let client = &mut client;
+            Box::pin(async move {
+                let counters = client.run(PerfCounterList).await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        #[tabled(rename = "type")]
+                        kind: String,
+                        name: String,
+                    }
+                    let rows: Vec<Row> = counters
+                        .iter()
+                        .map(|c| Row {
+                            kind: format!("{:#010x}", c.kind),
+                            name: c.name.clone(),
+                        })
+                        .collect();
+                    print_colored_table(&heading_label("pclist", &ui), rows, &ui);
+                } else {
+                    for c in counters {
+                        println!("{:#010x}\t{}", c.kind, c.name);
+                    }
                 }
-                let rows: Vec<Row> = counters
-                    .iter()
-                    .map(|c| Row {
-                        kind: format!("{:#010x}", c.kind),
-                        name: c.name.clone(),
-                    })
-                    .collect();
-                print_colored_table(&heading_label("pclist", &ui), rows, &ui);
-            } else {
-                for c in counters {
-                    println!("{:#010x}\t{}", c.kind, c.name);
-                }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Querypc { name, kind } => {
-            let sample = client.run(QueryPerfCounter { name, kind }).await?;
-            println!(
-                "type={:#010x} value={} rate={}",
-                sample.kind, sample.value, sample.rate
-            );
+            let client = &mut client;
+            Box::pin(async move {
+                let sample = client.run(QueryPerfCounter { name, kind }).await?;
+                println!(
+                    "type={:#010x} value={} rate={}",
+                    sample.kind, sample.value, sample.rate
+                );
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Sockets => {
-            let sockets = client.run(GetSocketInfo).await?;
-            if ui.pretty() {
-                #[derive(Tabled)]
-                struct Row {
-                    handle: String,
-                    af: u32,
-                    #[tabled(rename = "type")]
-                    sock_type: u32,
-                    proto: u32,
-                    local: String,
-                    remote: String,
-                    tcpstate: u32,
-                    flags: String,
+            let client = &mut client;
+            Box::pin(async move {
+                let sockets = client.run(GetSocketInfo).await?;
+                if ui.pretty() {
+                    #[derive(Tabled)]
+                    struct Row {
+                        handle: String,
+                        af: u32,
+                        #[tabled(rename = "type")]
+                        sock_type: u32,
+                        proto: u32,
+                        local: String,
+                        remote: String,
+                        tcpstate: u32,
+                        flags: String,
+                    }
+                    let rows: Vec<Row> = sockets
+                        .iter()
+                        .map(|s| Row {
+                            handle: format!("{:#010x}", s.handle),
+                            af: s.addr_family,
+                            sock_type: s.socket_type,
+                            proto: s.protocol,
+                            local: format!("{:#010x}:{:#06x}", s.local_addr, s.local_port),
+                            remote: format!("{:#010x}:{:#06x}", s.remote_addr, s.remote_port),
+                            tcpstate: s.tcp_state,
+                            flags: format!("{:#010x}", s.flags),
+                        })
+                        .collect();
+                    print_colored_table(&heading_label("sockets", &ui), rows, &ui);
+                } else {
+                    for s in sockets {
+                        println!(
+                            "handle={:#010x} af={} type={} proto={} local={:#010x}:{:#06x} remote={:#010x}:{:#06x} tcpstate={} flags={:#010x}",
+                            s.handle,
+                            s.addr_family,
+                            s.socket_type,
+                            s.protocol,
+                            s.local_addr,
+                            s.local_port,
+                            s.remote_addr,
+                            s.remote_port,
+                            s.tcp_state,
+                            s.flags
+                        );
+                    }
                 }
-                let rows: Vec<Row> = sockets
-                    .iter()
-                    .map(|s| Row {
-                        handle: format!("{:#010x}", s.handle),
-                        af: s.addr_family,
-                        sock_type: s.socket_type,
-                        proto: s.protocol,
-                        local: format!("{:#010x}:{:#06x}", s.local_addr, s.local_port),
-                        remote: format!("{:#010x}:{:#06x}", s.remote_addr, s.remote_port),
-                        tcpstate: s.tcp_state,
-                        flags: format!("{:#010x}", s.flags),
-                    })
-                    .collect();
-                print_colored_table(&heading_label("sockets", &ui), rows, &ui);
-            } else {
-                for s in sockets {
-                    println!(
-                        "handle={:#010x} af={} type={} proto={} local={:#010x}:{:#06x} remote={:#010x}:{:#06x} tcpstate={} flags={:#010x}",
-                        s.handle,
-                        s.addr_family,
-                        s.socket_type,
-                        s.protocol,
-                        s.local_addr,
-                        s.local_port,
-                        s.remote_addr,
-                        s.remote_port,
-                        s.tcp_state,
-                        s.flags
-                    );
-                }
-            }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Isstopped { thread } => {
-            let id = parse_thread_id(&thread)?;
-            let state = client.run(IsStopped { thread: id }).await?;
-            println!("{state:?}");
+            let client = &mut client;
+            Box::pin(async move {
+                let id = parse_thread_id(&thread)?;
+                let state = client.run(IsStopped { thread: id }).await?;
+                println!("{state:?}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Reboot {
             warm,
@@ -1582,52 +1715,72 @@ where
             wait,
             title,
         } => {
-            client
-                .run(Reboot {
-                    flags: RebootFlags {
-                        warm,
-                        stop_on_start,
-                        no_debug,
-                        wait,
-                    },
-                    title,
-                    directory: None,
-                    cmd_line: None,
-                })
-                .await?;
-            println!("reboot issued");
+            let client = &mut client;
+            Box::pin(async move {
+                client
+                    .run(Reboot {
+                        flags: RebootFlags {
+                            warm,
+                            stop_on_start,
+                            no_debug,
+                            wait,
+                        },
+                        title,
+                        directory: None,
+                        cmd_line: None,
+                    })
+                    .await?;
+                println!("reboot issued");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::SetTitle { nopersist, name } => {
-            let cmd = if nopersist {
-                Title::NoPersist
-            } else {
-                Title::Set {
-                    name: name.unwrap_or_default(),
-                }
-            };
-            client.run(cmd).await?;
+            let client = &mut client;
+            Box::pin(async move {
+                let cmd = if nopersist {
+                    Title::NoPersist
+                } else {
+                    Title::Set {
+                        name: name.unwrap_or_default(),
+                    }
+                };
+                client.run(cmd).await?;
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Setmem { address, hex } => {
-            let addr = parse_u32(&address).map_err(rootcause::Report::new)?;
-            let data = decode_hex(&hex)
-                .map_err(rootcause::Report::new)
-                .attach_with(|| format!("decoding --data {hex:?}"))?;
-            let result = client
-                .run(SetMem {
-                    address: addr,
-                    data,
-                })
-                .await?;
-            println!("requested={} written={}", result.requested, result.written);
+            let client = &mut client;
+            Box::pin(async move {
+                let addr = parse_u32(&address).map_err(rootcause::Report::new)?;
+                let data = decode_hex(&hex)
+                    .map_err(rootcause::Report::new)
+                    .attach_with(|| format!("decoding --data {hex:?}"))?;
+                let result = client
+                    .run(SetMem {
+                        address: addr,
+                        data,
+                    })
+                    .await?;
+                println!("requested={} written={}", result.requested, result.written);
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Bp { address, clear } => {
-            let addr = parse_u32(&address).map_err(rootcause::Report::new)?;
-            client
-                .run(Breakpoint {
-                    address: addr,
-                    clear,
-                })
-                .await?;
+            let client = &mut client;
+            Box::pin(async move {
+                let addr = parse_u32(&address).map_err(rootcause::Report::new)?;
+                client
+                    .run(Breakpoint {
+                        address: addr,
+                        clear,
+                    })
+                    .await?;
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Databp {
             address,
@@ -1635,90 +1788,102 @@ where
             kind,
             clear,
         } => {
-            let addr = parse_u32(&address).map_err(rootcause::Report::new)?;
-            let kind = match kind.to_ascii_lowercase().as_str() {
-                "read" => DataBreakKind::Read,
-                "write" => DataBreakKind::Write,
-                "readwrite" | "rw" => DataBreakKind::ReadWrite,
-                "execute" | "exec" => DataBreakKind::Execute,
-                _ => {
-                    return Err(rootcause::Report::new(Error::from(
-                        xeedee::error::ArgumentError::EmptyFilename,
-                    ))
-                    .attach("kind must be one of read/write/readwrite/execute"));
-                }
-            };
-            client
-                .run(DataBreakpoint {
-                    address: addr,
-                    size,
-                    kind,
-                    clear,
-                })
-                .await?;
+            let client = &mut client;
+            Box::pin(async move {
+                let addr = parse_u32(&address).map_err(rootcause::Report::new)?;
+                let kind = match kind.to_ascii_lowercase().as_str() {
+                    "read" => DataBreakKind::Read,
+                    "write" => DataBreakKind::Write,
+                    "readwrite" | "rw" => DataBreakKind::ReadWrite,
+                    "execute" | "exec" => DataBreakKind::Execute,
+                    _ => {
+                        return Err(rootcause::Report::new(Error::from(
+                            xeedee::error::ArgumentError::EmptyFilename,
+                        ))
+                        .attach("kind must be one of read/write/readwrite/execute"));
+                    }
+                };
+                client
+                    .run(DataBreakpoint {
+                        address: addr,
+                        size,
+                        kind,
+                        clear,
+                    })
+                    .await?;
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         Command::Screenshot { output, raw } => {
-            let shot = client.screenshot().await?;
-            let meta = shot.metadata;
-            eprintln!(
-                "{} {}x{} pitch={} bytes={} format={:?}",
-                ok_tag("captured"),
-                meta.width,
-                meta.height,
-                meta.pitch,
-                meta.framebuffer_size,
-                meta.format
-            );
-            if raw {
-                std::fs::write(&output, &shot.data)
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach_with(|| format!("writing raw framebuffer to {output}"))?;
-                let sidecar = format!("{output}.meta");
-                let meta_text = format!(
-                    "pitch={}\nwidth={}\nheight={}\nformat={:?}\nframebuffer_size={}\npitch_hex={:#010x}\nformat_raw={:#010x}\n",
-                    meta.pitch,
+            let client = &mut client;
+            Box::pin(async move {
+                let shot = client.screenshot().await?;
+                let meta = shot.metadata;
+                eprintln!(
+                    "{} {}x{} pitch={} bytes={} format={:?}",
+                    ok_tag("captured"),
                     meta.width,
                     meta.height,
-                    meta.format,
-                    meta.framebuffer_size,
                     meta.pitch,
-                    meta.format.raw()
+                    meta.framebuffer_size,
+                    meta.format
                 );
-                std::fs::write(&sidecar, meta_text)
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach("writing metadata sidecar")?;
-                eprintln!(
-                    "{} raw framebuffer + metadata to {output} (+ {sidecar})",
-                    ok_tag("wrote"),
-                );
-            } else {
-                let rgba = shot.to_rgba8().ok_or_else(|| {
-                    rootcause::Report::new(Error::from(
-                        xeedee::error::ArgumentError::EmptyFilename,
-                    ))
-                    .attach(format!(
-                        "cannot convert format {:?} to PNG without de-tiling; re-run with --raw",
-                        meta.format
-                    ))
-                })?;
-                let buffer =
-                    image::RgbaImage::from_raw(meta.width, meta.height, rgba).ok_or_else(|| {
+                if raw {
+                    std::fs::write(&output, &shot.data)
+                        .map_err(Error::from)
+                        .into_report()
+                        .attach_with(|| format!("writing raw framebuffer to {output}"))?;
+                    let sidecar = format!("{output}.meta");
+                    let meta_text = format!(
+                        "pitch={}\nwidth={}\nheight={}\nformat={:?}\nframebuffer_size={}\npitch_hex={:#010x}\nformat_raw={:#010x}\n",
+                        meta.pitch,
+                        meta.width,
+                        meta.height,
+                        meta.format,
+                        meta.framebuffer_size,
+                        meta.pitch,
+                        meta.format.raw()
+                    );
+                    std::fs::write(&sidecar, meta_text)
+                        .map_err(Error::from)
+                        .into_report()
+                        .attach("writing metadata sidecar")?;
+                    eprintln!(
+                        "{} raw framebuffer + metadata to {output} (+ {sidecar})",
+                        ok_tag("wrote"),
+                    );
+                } else {
+                    let rgba = shot.to_rgba8().ok_or_else(|| {
                         rootcause::Report::new(Error::from(
                             xeedee::error::ArgumentError::EmptyFilename,
                         ))
-                        .attach("RgbaImage::from_raw rejected the buffer dimensions")
+                        .attach(format!(
+                            "cannot convert format {:?} to PNG without de-tiling; re-run with --raw",
+                            meta.format
+                        ))
                     })?;
-                let png_msg = format!("encoding PNG to {output}");
-                buffer
-                    .save_with_format(&output, image::ImageFormat::Png)
-                    .map_err(|e| {
-                        rootcause::Report::new(Error::from(std::io::Error::other(e.to_string())))
+                    let buffer = image::RgbaImage::from_raw(meta.width, meta.height, rgba)
+                        .ok_or_else(|| {
+                            rootcause::Report::new(Error::from(
+                                xeedee::error::ArgumentError::EmptyFilename,
+                            ))
+                            .attach("RgbaImage::from_raw rejected the buffer dimensions")
+                        })?;
+                    let png_msg = format!("encoding PNG to {output}");
+                    buffer
+                        .save_with_format(&output, image::ImageFormat::Png)
+                        .map_err(|e| {
+                            rootcause::Report::new(Error::from(std::io::Error::other(
+                                e.to_string(),
+                            )))
                             .attach(png_msg)
-                    })?;
-                eprintln!("{} PNG to {output}", ok_tag("wrote"));
-            }
+                        })?;
+                    eprintln!("{} PNG to {output}", ok_tag("wrote"));
+                }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         #[cfg(feature = "capture")]
         Command::Capture { .. } => {
@@ -1726,7 +1891,12 @@ where
         }
         #[cfg(feature = "capture")]
         Command::PixcmdProbe { subcommand } => {
-            run_pixcmd_probe(&mut client, &subcommand).await?;
+            let client = &mut client;
+            Box::pin(async move {
+                run_pixcmd_probe(client, &subcommand).await?;
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         #[cfg(feature = "capture")]
         Command::PixNotify { .. } => {
@@ -1737,39 +1907,53 @@ where
             unreachable!("Xbm is handled by run_xbm before drive_connected")
         }
         Command::Raw { line } => {
-            let resp = client.send_raw(&line).await?;
-            println!("{resp:#?}");
+            let client = &mut client;
+            Box::pin(async move {
+                let resp = client.send_raw(&line).await?;
+                println!("{resp:#?}");
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
         }
         #[cfg(feature = "dangerous")]
-        Command::Dangerous(cmd) => match cmd {
-            DangerousCommand::DrivemapStatus => {
-                let status = dm::status(&mut client).await?;
-                println!(
-                    "xbdm @ {:#010x}, drivemap_fn @ {:#010x}, flag @ {:#010x} = {:#010x}, altaddr entry @ {:#010x}",
-                    status.layout.module.base,
-                    status.layout.drivemap_fn,
-                    status.layout.flag_global,
-                    status.flag_value,
-                    status.layout.altaddr_entry.name_ptr_addr
-                );
-                println!("visible drives: {:?}", status.visible_drives);
-            }
-            DangerousCommand::DrivemapEnable => unreachable!(
-                "DrivemapEnable is handled by run_drivemap_enable before drive_connected"
-            ),
-            DangerousCommand::NandDump { .. } => {
-                unreachable!("NandDump is handled by run_nand_dump before drive_connected")
-            }
-            DangerousCommand::DrivemapPersist => {
-                let report = dm::persist(&mut client).await?;
-                eprintln!(
-                    "{} wrote {} bytes to {}",
-                    ok_tag("persisted"),
-                    report.bytes_written,
-                    report.path
-                );
-            }
-        },
+        Command::Dangerous(cmd) => {
+            let client = &mut client;
+            Box::pin(async move {
+                match cmd {
+                    DangerousCommand::DrivemapStatus => {
+                        let status = dm::status(client).await?;
+                        println!(
+                            "xbdm @ {:#010x}, drivemap_fn @ {:#010x}, flag @ {:#010x} = {:#010x}, altaddr entry @ {:#010x}",
+                            status.layout.module.base,
+                            status.layout.drivemap_fn,
+                            status.layout.flag_global,
+                            status.flag_value,
+                            status.layout.altaddr_entry.name_ptr_addr
+                        );
+                        println!("visible drives: {:?}", status.visible_drives);
+                    }
+                    DangerousCommand::DrivemapEnable => unreachable!(
+                        "DrivemapEnable is handled by run_drivemap_enable before drive_connected"
+                    ),
+                    DangerousCommand::NandDump { .. } => {
+                        unreachable!(
+                            "NandDump is handled by run_nand_dump before drive_connected"
+                        )
+                    }
+                    DangerousCommand::DrivemapPersist => {
+                        let report = dm::persist(client).await?;
+                        eprintln!(
+                            "{} wrote {} bytes to {}",
+                            ok_tag("persisted"),
+                            report.bytes_written,
+                            report.path
+                        );
+                    }
+                }
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
     }
 
     let _ = client.bye().await;
