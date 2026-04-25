@@ -8,3 +8,6 @@
 
 # diplomat-generated C++ headers; regenerated in CI and at release time.
 /crates/xeedee-ffi/bindings/
+
+# insta snapshot pending-review files (stay local until accepted/rejected).
+*.pending-snap

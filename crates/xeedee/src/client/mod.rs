@@ -8,6 +8,12 @@
 //! Further states (dedicated handlers, debugger attach, notification
 //! channels) can be layered on by moving the `Client<Connected>` through
 //! additional transitions that consume it and return a new parameterisation.
+//!
+//! The async [`Client`] in this module owns its transport and drives the
+//! protocol via `futures_io::AsyncRead`/`AsyncWrite`. Callers that need
+//! to drive the protocol from a blocking socket, an embedded transport,
+//! or a WASM host can use [`engine::ClientEngine`] instead -- a separate,
+//! socket-free state machine that exposes the same protocol events.
 
 use futures_util::io::AsyncRead;
 use futures_util::io::AsyncWrite;
@@ -24,8 +30,12 @@ use crate::protocol::framing::LineBuffer;
 use crate::protocol::response::Response;
 use crate::protocol::response::read_response;
 
+pub mod engine;
 mod state;
 
+pub use engine::ClientEngine;
+pub use engine::ClientEvent;
+pub use engine::SubmitError;
 pub use state::Connected;
 pub use state::Fresh;
 

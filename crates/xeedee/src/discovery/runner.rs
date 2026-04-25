@@ -27,11 +27,10 @@ pub async fn find_by_name(
     name: &str,
     config: DiscoveryConfig,
 ) -> Result<Option<DiscoveredConsole>, rootcause::Report<Error>> {
-    let engine = Discovery::lookup(name, config.clone(), Instant::now())
-        .map_err(|e| {
-            rootcause::Report::new(Error::from(crate::error::TransportError::ConnectTimeout))
-                .attach(format!("nap encode error: {e}"))
-        })?;
+    let engine = Discovery::lookup(name, config.clone(), Instant::now()).map_err(|e| {
+        rootcause::Report::new(Error::from(crate::error::TransportError::ConnectTimeout))
+            .attach(format!("nap encode error: {e}"))
+    })?;
     let results = drive(engine, config).await?;
     Ok(results.into_iter().next())
 }

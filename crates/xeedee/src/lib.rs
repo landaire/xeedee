@@ -11,8 +11,11 @@ pub mod transport;
 mod client;
 
 pub use client::Client;
+pub use client::ClientEngine;
+pub use client::ClientEvent;
 pub use client::Connected;
 pub use client::Fresh;
+pub use client::SubmitError;
 pub use error::ArgumentError;
 pub use error::Error;
 pub use error::ExpectedShape;

@@ -42,6 +42,7 @@ pub use response::Response;
 pub use response::ResponseHead;
 pub use response::parse_response_head;
 pub use response::read_response;
+pub use status::Classified;
 pub use status::ErrorCode;
 pub use status::StatusCode;
 pub use status::SuccessCode;

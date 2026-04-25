@@ -241,7 +241,9 @@ impl Discovery {
         if !self.seen.insert(src) {
             return;
         }
-        let Ok(reply) = parse_response(payload) else { return };
+        let Ok(reply) = parse_response(payload) else {
+            return;
+        };
         let console = DiscoveredConsole {
             name: reply.name,
             addr: src,
@@ -317,7 +319,10 @@ mod tests {
         let start = t0();
         let mut d = Discovery::broadcast(config_with(2, 400, 1500), start);
         // Initial send.
-        assert!(matches!(d.poll(start), DiscoveryAction::SendDatagram { .. }));
+        assert!(matches!(
+            d.poll(start),
+            DiscoveryAction::SendDatagram { .. }
+        ));
         // Before interval elapses: Wait.
         match d.poll(start + Duration::from_millis(200)) {
             DiscoveryAction::Wait { until } => {
