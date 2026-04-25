@@ -10,11 +10,15 @@
 //! be tested and fuzzed without any sockets. The I/O-bearing runner lives
 //! in [`runner`] and is feature-gated behind `tokio`.
 
+mod engine;
 mod wire;
 
 #[cfg(feature = "tokio")]
 pub mod runner;
 
+pub use engine::Discovery;
+pub use engine::DiscoveryAction;
+pub use engine::DiscoveryConfig;
 pub use wire::DiscoveredConsole;
 pub use wire::MAX_NAME_LEN;
 pub use wire::NAP_PORT;
@@ -26,8 +30,6 @@ pub use wire::RequestOpcode;
 pub use wire::encode_request;
 pub use wire::parse_response;
 
-#[cfg(feature = "tokio")]
-pub use runner::DiscoveryConfig;
 #[cfg(feature = "tokio")]
 pub use runner::discover_all;
 #[cfg(feature = "tokio")]
