@@ -389,7 +389,14 @@ impl ClientEngine {
     /// or oversize line the engine transitions to Failed and `None`
     /// is returned so the outer loop notices via the queued event.
     fn try_take_line(&mut self) -> Option<String> {
-        let pos = memchr(b'\n', &self.inbox)?;
+        let Some(pos) = memchr(b'\n', &self.inbox) else {
+            // An unterminated line must be capped here: without this the
+            // peer can grow the inbox without bound by never sending LF.
+            if self.inbox.len() > MAX_LINE_LEN {
+                self.fail(Error::Framing(FramingError::LineTooLong));
+            }
+            return None;
+        };
         let end = if pos > 0 && self.inbox[pos - 1] == b'\r' {
             pos - 1
         } else {
@@ -580,6 +587,30 @@ mod tests {
             e.submit("second", None),
             Err(SubmitError::CommandInFlight)
         ));
+    }
+
+    #[test]
+    fn unterminated_line_is_capped_before_a_terminator_arrives() {
+        let mut engine = ClientEngine::new();
+        engine.recv(b"201- connected\r\n");
+        drive(&mut engine);
+        engine.submit("dbgname", None).unwrap();
+
+        // A peer that never sends LF must not grow the inbox forever.
+        let chunk = vec![b'A'; 4096];
+        let mut events = Vec::new();
+        for _ in 0..8 {
+            engine.recv(&chunk);
+            events.extend(drive(&mut engine));
+        }
+        assert!(
+            matches!(
+                events.last(),
+                Some(ClientEvent::Failed(e)) if matches!(**e, Error::Framing(FramingError::LineTooLong))
+            ),
+            "expected LineTooLong, got {events:?}"
+        );
+        assert!(engine.is_terminal());
     }
 
     #[test]
