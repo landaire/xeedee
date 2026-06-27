@@ -30,6 +30,7 @@ pub use debug::Continue;
 pub use debug::DataAccess;
 pub use debug::DataBreakKind;
 pub use debug::DataBreakpoint;
+pub use debug::Debugger;
 pub use debug::Go;
 pub use debug::Halt;
 pub use debug::IsBreak;

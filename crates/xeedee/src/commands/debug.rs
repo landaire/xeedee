@@ -458,3 +458,36 @@ impl Command for IsBreak {
         })
     }
 }
+
+
+#[derive(Debug, Clone)]
+pub struct Debugger {
+    pub do_override: bool,
+    pub name: String,
+    pub user: String,
+}
+
+impl Command for Debugger {
+    type Output = ();
+
+    fn wire_line(&self) -> Result<String, rootcause::Report<Error>> {
+        let mut builder =
+            ArgBuilder::new("debugger").flag("connect");
+        if self.do_override {
+            builder = builder.flag("override");
+        }
+        builder = builder.quoted("name", &self.name).unwrap();
+        builder = builder.quoted("user", &self.user).unwrap();
+        
+        Ok(builder.finish())
+    }
+
+    fn expected(&self) -> ExpectedBody {
+        ExpectedBody::Line
+    }
+
+    fn parse(&self, response: Response) -> Result<Self::Output, rootcause::Report<Error>> {
+        response.expect_ok().map_err(rootcause::Report::new)?;
+        Ok(())
+    }
+}
