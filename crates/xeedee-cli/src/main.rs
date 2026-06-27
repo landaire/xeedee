@@ -55,6 +55,7 @@ use xeedee::commands::Threads;
 use xeedee::commands::Title;
 use xeedee::commands::WalkMem;
 use xeedee::commands::XbeInfo;
+use xeedee::commands::Debugger;
 #[cfg(feature = "dangerous")]
 use xeedee::commands::dangerous::drivemap as dm;
 #[cfg(feature = "capture")]
@@ -377,6 +378,15 @@ enum Command {
         raw: bool,
     },
 
+    Debugger {
+        #[arg(short, long, default_value = "true")]
+        do_override: bool,
+        #[arg(short, long, default_value = "xeedee")]
+        name: String,
+        #[arg(short, long, default_value = "xeedee")]
+        user: String,
+    },
+    
     /// Drive an xbmovie-style PIX! movie capture session against the
     /// title currently registered as the PIX handler (dash.xex,
     /// xshell.xex, or the running game). Emits intermediate capture
@@ -841,6 +851,9 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
                 ui,
             )
             .await;
+        }
+        Command::Debugger { do_override, name, user } => {
+            return run_debugger(&target, conn_timeout, 0, *do_override, name, user).await;
         }
         _ => {}
     }
@@ -1814,6 +1827,9 @@ where
                 Ok::<(), rootcause::Report<Error>>(())
             })
             .await?;
+        }
+        Command::Debugger { .. } => {
+            unreachable!("Debugger is handled by run_debugger before drive_connected")
         }
         Command::Screenshot { output, raw } => {
             let client = &mut client;
@@ -3030,6 +3046,86 @@ fn which_ffmpeg() -> Result<(), rootcause::Report<Error>> {
                 ),
         )
     }
+}
+
+async fn run_debugger(
+    target: &Target,
+    conn_timeout: Duration,
+    duration_secs: u64,
+    do_override: bool,
+    name: &str,
+    user: &str,
+) -> Result<(), rootcause::Report<Error>> {
+    use futures_util::io::AsyncBufReadExt as _;
+    use futures_util::io::BufReader;
+
+    let transport = connect_target_timeout(target, conn_timeout).await?;
+    let mut client = xeedee::Client::new(transport).read_banner().await?;
+
+    let cmd = Debugger {
+        do_override: do_override,
+        name: name.into(),
+        user: user.into(),
+    };
+    let ack = client.run(cmd).await?;
+    eprintln!(
+        "{} {ack:?}; {}",
+        ok_tag("subscribed"),
+        if duration_secs == 0 {
+            "Ctrl-C to stop".to_owned()
+        } else {
+            format!("stopping in {duration_secs}s")
+        }
+    );
+
+    // `notify` turns the current connection into a pure notification
+    // channel after xbdm acknowledges with a single response line;
+    // subsequent reads get async events at the server's discretion.
+    client.send_raw("notify reconnectport=0").await?;
+    
+    let mut transport = client.into_inner();
+    let mut reader = BufReader::new(&mut transport);
+    let mut line = String::new();
+
+    let deadline = if duration_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(duration_secs))
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        line.clear();
+        let read = async { reader.read_line(&mut line).await };
+        let remaining = deadline.map(|d| d.saturating_sub(start.elapsed()));
+        let result = match remaining {
+            Some(Duration::ZERO) => break,
+            Some(r) => match tokio::time::timeout(r, read).await {
+                Ok(r) => r,
+                Err(_) => break,
+            },
+            None => read.await,
+        };
+        match result {
+            Ok(0) => {
+                eprintln!("{} notification channel closed", warn_tag("eof:"));
+                break;
+            }
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let ts = start.elapsed().as_millis();
+                let rendered = format!("{ts:>6}ms {trimmed}");
+                println!("{rendered}");
+            }
+            Err(e) => {
+                return Err(rootcause::Report::new(Error::from(e)));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "capture")]
