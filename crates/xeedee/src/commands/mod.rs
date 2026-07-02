@@ -89,6 +89,7 @@ pub use perf::PerfCounterList;
 pub use perf::PerfCounterSample;
 pub use perf::QueryPerfCounter;
 pub use perf::SocketEntry;
+pub use process::MagicBoot;
 pub use process::ModuleInfo;
 pub use process::ModuleSection;
 pub use process::ModuleSections;
