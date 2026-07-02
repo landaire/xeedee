@@ -11,6 +11,8 @@ use indicatif::ProgressBar;
 use owo_colors::OwoColorize;
 use rootcause::prelude::*;
 use tabled::Tabled;
+use xeedee::commands::MagicBoot;
+use xeedee::commands::process::MagicBootFlags;
 
 mod ui;
 
@@ -22,6 +24,7 @@ use xeedee::commands::Breakpoint;
 use xeedee::commands::DataBreakKind;
 use xeedee::commands::DataBreakpoint;
 use xeedee::commands::DbgName;
+use xeedee::commands::Debugger;
 use xeedee::commands::Delete;
 use xeedee::commands::DirList;
 use xeedee::commands::DmVersion;
@@ -55,7 +58,6 @@ use xeedee::commands::Threads;
 use xeedee::commands::Title;
 use xeedee::commands::WalkMem;
 use xeedee::commands::XbeInfo;
-use xeedee::commands::Debugger;
 #[cfg(feature = "dangerous")]
 use xeedee::commands::dangerous::drivemap as dm;
 #[cfg(feature = "capture")]
@@ -157,6 +159,37 @@ enum SortOrder {
     Desc,
 }
 
+#[derive(Parser, Debug)]
+struct MagicBootOptions {
+    /// Boot into this title path (e.g. `DEVKIT:\game.xex`).
+    #[arg(long)]
+    title: Option<String>,
+
+    /// Media directory path.
+    #[arg(long)]
+    directory: Option<String>,
+
+    /// Command line arguments to pass to the title.
+    #[arg(long)]
+    cmdline: Option<String>,
+
+    /// Block the response until the console is reachable again.
+    #[arg(long)]
+    wait: bool,
+
+    /// Force a cold reboot instead of warm.
+    #[arg(long)]
+    cold: bool,
+
+    /// Keep the current title memory intact where possible.
+    #[arg(long)]
+    warm: bool,
+
+    /// Pause execution immediately after boot so a debugger can attach.
+    #[arg(long)]
+    stop: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Broadcast an XBDM NAP discovery probe and list all consoles that
@@ -253,7 +286,9 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-
+    /// Boot into a title with optional parameters. Replaces the currently
+    /// loaded title and reboots into it.
+    MagicBoot(MagicBootOptions),
     /// Enumerate the console's virtual-address ranges.
     Walkmem,
 
@@ -386,7 +421,7 @@ enum Command {
         #[arg(short, long, default_value = "xeedee")]
         user: String,
     },
-    
+
     /// Drive an xbmovie-style PIX! movie capture session against the
     /// title currently registered as the PIX handler (dash.xex,
     /// xshell.xex, or the running game). Emits intermediate capture
@@ -852,7 +887,11 @@ async fn run(cli: Cli) -> Result<(), rootcause::Report<Error>> {
             )
             .await;
         }
-        Command::Debugger { do_override, name, user } => {
+        Command::Debugger {
+            do_override,
+            name,
+            user,
+        } => {
             return run_debugger(&target, conn_timeout, 0, *do_override, name, user).await;
         }
         _ => {}
@@ -1567,6 +1606,25 @@ where
                 println!("name={}", info.name);
                 println!("timestamp={:#010x}", info.timestamp);
                 println!("checksum={:#010x}", info.checksum);
+                Ok::<(), rootcause::Report<Error>>(())
+            })
+            .await?;
+        }
+        Command::MagicBoot(opts) => {
+            let client = &mut client;
+            Box::pin(async move {
+                let cmd = MagicBoot {
+                    title: opts.title,
+                    directory: opts.directory,
+                    cmdline: opts.cmdline,
+                    flags: MagicBootFlags {
+                        wait: opts.wait,
+                        cold: opts.cold,
+                        warm: opts.warm,
+                        stop: opts.stop,
+                    },
+                };
+                client.run(cmd).await?;
                 Ok::<(), rootcause::Report<Error>>(())
             })
             .await?;
@@ -3063,13 +3121,14 @@ async fn run_debugger(
     let mut client = xeedee::Client::new(transport).read_banner().await?;
 
     let cmd = Debugger {
-        do_override: do_override,
+        do_override,
         name: name.into(),
         user: user.into(),
     };
-    let ack = client.run(cmd).await?;
+
+    client.run(cmd).await?;
     eprintln!(
-        "{} {ack:?}; {}",
+        "{}, {}",
         ok_tag("subscribed"),
         if duration_secs == 0 {
             "Ctrl-C to stop".to_owned()
@@ -3082,7 +3141,7 @@ async fn run_debugger(
     // channel after xbdm acknowledges with a single response line;
     // subsequent reads get async events at the server's discretion.
     client.send_raw("notify reconnectport=0").await?;
-    
+
     let mut transport = client.into_inner();
     let mut reader = BufReader::new(&mut transport);
     let mut line = String::new();
