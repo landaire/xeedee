@@ -269,7 +269,9 @@ impl XbdmFs {
     where
         F: for<'a> FnOnce(
             &'a mut Client<TokioTransport, Connected>,
-        ) -> Pin<Box<dyn Future<Output = Result<R, rootcause::Report<Error>>> + 'a>>,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<R, rootcause::Report<Error>>> + 'a>,
+        >,
     {
         let mut client = self.client.lock().unwrap();
         let result = self.rt.block_on(f(&mut client));
@@ -277,10 +279,11 @@ impl XbdmFs {
             && is_connection_error(report)
         {
             tracing::warn!(error = ?report, "XBDM connection looks broken, reconnecting");
-            match self
-                .rt
-                .block_on(async { Client::new(connect_target_timeout(&self.target, self.timeout).await?).read_banner().await })
-            {
+            match self.rt.block_on(async {
+                Client::new(connect_target_timeout(&self.target, self.timeout).await?)
+                    .read_banner()
+                    .await
+            }) {
                 Ok(fresh) => *client = fresh,
                 Err(reconnect_err) => {
                     tracing::error!(error = ?reconnect_err, "reconnect failed");
@@ -323,7 +326,11 @@ impl Filesystem for XbdmFs {
             match self.xbdm(move |c| Box::pin(async move { c.run(DriveList).await })) {
                 Ok(drives) if drives.iter().any(|d| d.eq_ignore_ascii_case(name_str)) => {
                     let ino = self.ino_for(path);
-                    reply.entry(&TTL, &synth_attr(ino, true, req.uid(), req.gid()), Generation(0));
+                    reply.entry(
+                        &TTL,
+                        &synth_attr(ino, true, req.uid(), req.gid()),
+                        Generation(0),
+                    );
                 }
                 Ok(_) => reply.error(Errno::ENOENT),
                 Err(e) => reply.error(e),
@@ -337,7 +344,11 @@ impl Filesystem for XbdmFs {
         }) {
             Ok(attrs) => {
                 let ino = self.ino_for(path);
-                reply.entry(&TTL, &make_attr(ino, &attrs, req.uid(), req.gid()), Generation(0));
+                reply.entry(
+                    &TTL,
+                    &make_attr(ino, &attrs, req.uid(), req.gid()),
+                    Generation(0),
+                );
             }
             Err(e) => reply.error(e),
         }
@@ -445,10 +456,16 @@ impl Filesystem for XbdmFs {
         };
         let path = child_path(&parent_path, name_str);
         let mk_path = path.clone();
-        match self.xbdm(move |c| Box::pin(async move { c.run(MakeDirectory { path: mk_path }).await })) {
+        match self
+            .xbdm(move |c| Box::pin(async move { c.run(MakeDirectory { path: mk_path }).await }))
+        {
             Ok(()) => {
                 let ino = self.ino_for(path);
-                reply.entry(&TTL, &synth_attr(ino, true, req.uid(), req.gid()), Generation(0));
+                reply.entry(
+                    &TTL,
+                    &synth_attr(ino, true, req.uid(), req.gid()),
+                    Generation(0),
+                );
             }
             Err(e) => reply.error(e),
         }
@@ -597,9 +614,9 @@ impl Filesystem for XbdmFs {
         // than a small file) would hard-error mid-transfer and leave the
         // connection desynced. Clamp to the real remaining size first.
         let stat_path = path.clone();
-        let total_size = match self
-            .xbdm(move |c| Box::pin(async move { c.run(GetFileAttributes { path: stat_path }).await }))
-        {
+        let total_size = match self.xbdm(move |c| {
+            Box::pin(async move { c.run(GetFileAttributes { path: stat_path }).await })
+        }) {
             Ok(attrs) => attrs.size,
             Err(e) => {
                 reply.error(e);
@@ -616,7 +633,13 @@ impl Filesystem for XbdmFs {
         // `Client::get_file`/`send_file` bypass `Client::run`'s own
         // send/recv tracing (they hold the transport directly mid-stream),
         // so log here -- otherwise transfers are invisible in `--log debug`.
-        tracing::debug!(path, offset, requested = size, sending = clamped_size, "fuse read -> getfile");
+        tracing::debug!(
+            path,
+            offset,
+            requested = size,
+            sending = clamped_size,
+            "fuse read -> getfile"
+        );
         let trace_path = path.clone();
         let result = self.xbdm(move |c| {
             Box::pin(async move {
@@ -728,7 +751,9 @@ impl Filesystem for XbdmFs {
             }
         } else {
             let list_path = path.clone();
-            match self.xbdm(move |c| Box::pin(async move { c.run(DirList { path: list_path }).await })) {
+            match self
+                .xbdm(move |c| Box::pin(async move { c.run(DirList { path: list_path }).await }))
+            {
                 Ok(dir_entries) => {
                     for entry in dir_entries {
                         let child = child_path(&path, &entry.name);
@@ -875,7 +900,10 @@ mod tests {
 
     #[test]
     fn drive_of_extracts_drive_root_with_trailing_backslash() {
-        assert_eq!(drive_of("DEVKIT:\\subdir\\file.bin"), Some("DEVKIT:\\".to_owned()));
+        assert_eq!(
+            drive_of("DEVKIT:\\subdir\\file.bin"),
+            Some("DEVKIT:\\".to_owned())
+        );
         assert_eq!(drive_of("DEVKIT:\\"), Some("DEVKIT:\\".to_owned()));
         assert_eq!(drive_of(""), None);
     }
