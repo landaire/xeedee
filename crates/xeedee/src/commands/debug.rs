@@ -3,6 +3,7 @@
 
 use crate::commands::kv::parse_kv_line;
 use crate::commands::process::ThreadId;
+use crate::error::ArgumentError;
 use crate::error::Error;
 use crate::error::ParseError;
 use crate::protocol::ArgBuilder;
@@ -12,6 +13,10 @@ use crate::protocol::ExpectedBody;
 use crate::protocol::Response;
 
 fn report_parse(err: ParseError) -> rootcause::Report<Error> {
+    rootcause::Report::new(Error::from(err))
+}
+
+fn report_argument(err: ArgumentError) -> rootcause::Report<Error> {
     rootcause::Report::new(Error::from(err))
 }
 
@@ -459,7 +464,6 @@ impl Command for IsBreak {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct Debugger {
     pub do_override: bool,
@@ -471,14 +475,17 @@ impl Command for Debugger {
     type Output = ();
 
     fn wire_line(&self) -> Result<String, rootcause::Report<Error>> {
-        let mut builder =
-            ArgBuilder::new("debugger").flag("connect");
+        let mut builder = ArgBuilder::new("debugger").flag("connect");
         if self.do_override {
             builder = builder.flag("override");
         }
-        builder = builder.quoted("name", &self.name).unwrap();
-        builder = builder.quoted("user", &self.user).unwrap();
-        
+        builder = builder
+            .quoted("name", &self.name)
+            .map_err(report_argument)?;
+        builder = builder
+            .quoted("user", &self.user)
+            .map_err(report_argument)?;
+
         Ok(builder.finish())
     }
 
