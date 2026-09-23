@@ -918,6 +918,42 @@ mod tests {
     }
 
     #[test]
+    fn close_read_mid_line_surfaces_closed() {
+        let mut engine = ClientEngine::new();
+        engine.recv(b"201- connected\r\n");
+        drive(&mut engine);
+        engine.submit("dbgname", None).unwrap();
+        engine.recv(b"200- partial");
+        assert!(drive(&mut engine).is_empty());
+
+        engine.close_read();
+        let events = drive(&mut engine);
+        assert!(matches!(events.as_slice(), [ClientEvent::Closed]));
+    }
+
+    #[test]
+    fn line_response_leaves_trailing_bytes_for_the_next_response() {
+        let mut engine = ClientEngine::new();
+        engine.recv(b"201- connected\r\n");
+        drive(&mut engine);
+        engine.submit("dbgname", None).unwrap();
+
+        // Two responses arriving in one read: the second must survive.
+        engine.recv(b"200- first\r\n200- second\r\n");
+        let events = drive(&mut engine);
+        assert_eq!(events.len(), 1);
+        engine.submit("dbgname", None).unwrap();
+        let events = drive(&mut engine);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ClientEvent::Response(Response::Line { head, .. })] if head == "second"
+            ),
+            "got {events:?}"
+        );
+    }
+
+    #[test]
     fn abort_stream_fails_engine_instead_of_returning_to_idle() {
         let mut engine = ClientEngine::new();
         engine.recv(b"201- connected\r\n");

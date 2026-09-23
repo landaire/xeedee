@@ -26,7 +26,6 @@ pub(crate) mod parse;
 
 mod args;
 mod command;
-pub mod framing;
 pub mod response;
 mod status;
 
@@ -35,13 +34,9 @@ pub use args::Qword;
 pub use args::QwordPair;
 pub use command::Command;
 pub use command::ExpectedBody;
-pub use framing::LineBuffer;
-pub use framing::MAX_LINE_LEN;
-pub use framing::read_line;
 pub use response::Response;
 pub use response::ResponseHead;
 pub use response::parse_response_head;
-pub use response::read_response;
 pub use status::Classified;
 pub use status::ErrorCode;
 pub use status::StatusCode;

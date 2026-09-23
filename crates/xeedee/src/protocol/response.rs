@@ -1,15 +1,8 @@
-use futures_util::io::AsyncRead;
-use futures_util::io::AsyncReadExt;
-use rootcause::prelude::*;
-
 use crate::error::Error;
 use crate::error::ExpectedShape;
 use crate::error::FramingError;
-use crate::protocol::framing::LineBuffer;
-use crate::protocol::framing::read_line;
 use crate::protocol::parse::response_head;
 use crate::protocol::parse::run_framing;
-use crate::protocol::status::Classified;
 use crate::protocol::status::StatusCode;
 use crate::protocol::status::SuccessCode;
 use crate::protocol::status::parse_status;
@@ -39,78 +32,6 @@ pub fn parse_response_head(line: &str) -> Result<ResponseHead, Error> {
         code,
         rest: rest.to_owned(),
     })
-}
-
-/// Read a single response from `reader`, handling multi-line and binary
-/// follow-ups. Binary payloads are only collected when `binary_len` is given;
-/// otherwise a `203` response returns with an empty data buffer and the
-/// caller is expected to drain the bytes itself.
-pub async fn read_response<R>(
-    reader: &mut R,
-    scratch: &mut LineBuffer,
-    binary_len: Option<usize>,
-) -> Result<Response, rootcause::Report<Error>>
-where
-    R: AsyncRead + Unpin,
-{
-    let head_line = read_line(reader, scratch).await?;
-    let head = parse_response_head(&head_line).map_err(rootcause::Report::new)?;
-
-    match head.code.try_classify() {
-        Classified::Error(code) => Err(rootcause::Report::new(Error::Remote {
-            code,
-            message: head.rest.clone(),
-        })
-        .attach(format!("wire line: {head_line:?}"))),
-        Classified::Unknown(code) => {
-            Err(
-                rootcause::Report::new(Error::UnknownStatusCode { raw: code.raw() })
-                    .attach(format!("wire line: {head_line:?}")),
-            )
-        }
-        Classified::Success(SuccessCode::MultilineFollows) => {
-            let mut lines = Vec::new();
-            loop {
-                let line = read_line(reader, scratch).await?;
-                if line == "." {
-                    break;
-                }
-                lines.push(line);
-            }
-            Ok(Response::Multiline {
-                head: head.rest,
-                lines,
-            })
-        }
-        Classified::Success(SuccessCode::BinaryFollows) => {
-            let mut data = Vec::new();
-            if let Some(len) = binary_len {
-                data.resize(len, 0);
-                reader
-                    .read_exact(&mut data)
-                    .await
-                    .map_err(Error::from)
-                    .into_report()
-                    .attach("reading binary response payload")?;
-            }
-            Ok(Response::Binary {
-                head: head.rest,
-                data,
-            })
-        }
-        Classified::Success(SuccessCode::SendBinary) => {
-            Ok(Response::SendBinary { head: head.rest })
-        }
-        Classified::Success(
-            code @ (SuccessCode::Ok
-            | SuccessCode::Connected
-            | SuccessCode::Disconnecting
-            | SuccessCode::Dedicated),
-        ) => Ok(Response::Line {
-            code,
-            head: head.rest,
-        }),
-    }
 }
 
 impl Response {
