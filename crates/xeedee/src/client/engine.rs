@@ -9,14 +9,30 @@
 //!   [`ClientEngine::close_read`]),
 //! - drain outbound bytes via [`ClientEngine::send`] (or peek the queued
 //!   length via [`ClientEngine::pending_send`]),
-//! - submit a command line via [`ClientEngine::submit`],
+//! - submit a command line via [`ClientEngine::submit`] (eager modes) or
+//!   [`ClientEngine::submit_streaming`] (caller-managed binary body),
 //! - pull the next protocol event via [`ClientEngine::poll`].
 //!
 //! Because the engine has no I/O of its own, it works identically over
 //! tokio TCP, blocking `std::net::TcpStream`, an in-memory test fixture,
 //! or a WASM host's custom TCP interface. The async [`Client`] in the
-//! parent module is a separate implementation today; this engine is the
-//! entry point for any caller that doesn't want to pull in tokio.
+//! parent module drives this engine under the hood.
+//!
+//! ## Streaming binary
+//!
+//! `getfile` payloads, screenshot framebuffers, and similar large 203
+//! responses don't fit the "buffer the whole body" model. For those,
+//! call [`ClientEngine::submit_streaming`]. When the head arrives the
+//! engine emits a [`ClientEvent::BinaryHead`] and parks in a
+//! `StreamingBody` state. The caller then:
+//!
+//! 1. drains any prefix bytes already buffered with
+//!    [`ClientEngine::take_inbox`],
+//! 2. reads the rest of the body straight from the transport,
+//! 3. calls [`ClientEngine::end_stream`] to return to `Idle` (passing
+//!    any over-read bytes that should be re-injected as new inbox).
+//!
+//! No further commands may be submitted until `end_stream` is called.
 //!
 //! ## Limitations
 //!
@@ -41,9 +57,13 @@ use crate::error::TransportError;
 use crate::protocol::Classified;
 use crate::protocol::ErrorCode;
 use crate::protocol::SuccessCode;
-use crate::protocol::framing::MAX_LINE_LEN;
 use crate::protocol::response::Response;
 use crate::protocol::response::parse_response_head;
+
+/// Maximum length of a single protocol line we'll accept. XBDM text
+/// lines are short in practice; anything longer is almost certainly a
+/// desynced stream.
+const MAX_LINE_LEN: usize = 16 * 1024;
 
 /// Output of [`ClientEngine::poll`]. Each variant maps to a single
 /// protocol-level event the I/O loop should react to.
@@ -54,6 +74,15 @@ pub enum ClientEvent {
     Connected,
     /// The most recently submitted command's response is complete.
     Response(Response),
+    /// 203 head arrived for a streaming submit. The engine is now in
+    /// `StreamingBody`: drain the inbox via [`ClientEngine::take_inbox`],
+    /// read the rest of the body off the transport, then call
+    /// [`ClientEngine::end_stream`] to return to `Idle`.
+    BinaryHead {
+        /// Text after the status code (typically `"binary response
+        /// follows"`).
+        head: String,
+    },
     /// XBDM returned a 4xx remote error for the most recent command.
     /// The connection itself is still healthy: the engine returns to
     /// idle and another command can be submitted. Distinct from
@@ -106,10 +135,7 @@ enum State {
     /// No command in flight.
     Idle,
     /// Command line was submitted; head line not yet received.
-    /// `binary_len` carries the per-command body size for the 203
-    /// binary path; `None` means "no binary body expected" (commands
-    /// returning 200/202/204 ignore this).
-    AwaitingHead { binary_len: Option<usize> },
+    AwaitingHead(HeadExpect),
     /// Got `202 multiline`; accumulating body lines until we see `.`.
     ReadingMultiline { head: String, lines: Vec<String> },
     /// Got `203 binary follows`; collecting `remaining` more bytes.
@@ -118,10 +144,30 @@ enum State {
         remaining: usize,
         data: Vec<u8>,
     },
+    /// Streaming caller has been notified of a 203 head and now owns
+    /// the body. The engine accepts no inbound bytes (recv is a no-op)
+    /// and refuses new submits until [`ClientEngine::end_stream`] is
+    /// called.
+    StreamingBody,
     /// Peer closed the connection.
     Closed,
     /// Hit a fatal protocol error; no further work possible.
     Failed,
+}
+
+/// What body shape the caller expects after submitting a command.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)]
+enum HeadExpect {
+    /// 200 / 201 / 202 / 204 only. A 203 here is a protocol error
+    /// because the engine has no way to know where the body ends.
+    NoBinary,
+    /// 203 expected; engine eagerly buffers `usize` body bytes into a
+    /// `Response::Binary` event.
+    EagerBinary(usize),
+    /// 203 expected; engine emits [`ClientEvent::BinaryHead`] and
+    /// surrenders the body to the caller via streaming.
+    StreamBinary,
 }
 
 impl Default for ClientEngine {
@@ -146,8 +192,16 @@ impl ClientEngine {
     /// appended to an internal buffer and the state machine is
     /// advanced as far as possible. Calling with an empty slice is a
     /// no-op.
+    ///
+    /// While in `StreamingBody` the engine is not framing; the caller
+    /// owns the wire. `recv` is a no-op there. Use
+    /// [`Self::end_stream`] to push any over-read bytes back into the
+    /// engine before calling `recv` again.
     pub fn recv(&mut self, bytes: &[u8]) {
-        if matches!(self.state, State::Closed | State::Failed) {
+        if matches!(
+            self.state,
+            State::Closed | State::Failed | State::StreamingBody
+        ) {
             return;
         }
         if !bytes.is_empty() {
@@ -195,20 +249,103 @@ impl ClientEngine {
     /// reply is `203 Binary` with `N` bytes of body. For other
     /// response shapes (line, multiline, upload-binary handshake)
     /// pass `None`; the engine reads them based on the wire status
-    /// code.
+    /// code. Use [`Self::submit_streaming`] for binary responses
+    /// whose size isn't known up front (e.g. `getfile`, `screenshot`).
     pub fn submit(&mut self, line: &str, binary_len: Option<usize>) -> Result<(), SubmitError> {
+        let expect = match binary_len {
+            Some(n) => HeadExpect::EagerBinary(n),
+            None => HeadExpect::NoBinary,
+        };
+        self.queue_submit(line, expect)
+    }
+
+    /// Submit a command whose 203 binary body the caller will stream
+    /// itself. When the head arrives the engine emits
+    /// [`ClientEvent::BinaryHead`] and parks in a `StreamingBody`
+    /// state; the caller drains [`Self::take_inbox`], reads the rest
+    /// of the body off the transport, and calls [`Self::end_stream`]
+    /// to release the engine.
+    ///
+    /// A non-203 head (Line/Multiline/204/4xx) on a streaming submit
+    /// flows through normally: the engine emits the corresponding
+    /// `Response`/`RemoteError` event and transitions back to `Idle`.
+    pub fn submit_streaming(&mut self, line: &str) -> Result<(), SubmitError> {
+        self.queue_submit(line, HeadExpect::StreamBinary)
+    }
+
+    fn queue_submit(&mut self, line: &str, expect: HeadExpect) -> Result<(), SubmitError> {
         match self.state {
             State::NeedBanner => return Err(SubmitError::NotConnected),
             State::Idle => {}
-            State::AwaitingHead { .. }
+            State::AwaitingHead(_)
             | State::ReadingMultiline { .. }
-            | State::ReadingBinary { .. } => return Err(SubmitError::CommandInFlight),
+            | State::ReadingBinary { .. }
+            | State::StreamingBody => return Err(SubmitError::CommandInFlight),
             State::Closed | State::Failed => return Err(SubmitError::Unusable),
         }
         self.outbox.extend_from_slice(line.as_bytes());
         self.outbox.extend_from_slice(b"\r\n");
-        self.state = State::AwaitingHead { binary_len };
+        self.state = State::AwaitingHead(expect);
         Ok(())
+    }
+
+    /// Drain any inbox bytes already buffered by the engine. Only
+    /// meaningful right after a [`ClientEvent::BinaryHead`]: the
+    /// returned bytes are the start of the streaming body, captured by
+    /// the same read that pulled in the head line. In any other state
+    /// returns whatever happens to be buffered (typically empty).
+    pub fn take_inbox(&mut self) -> BytesMut {
+        std::mem::take(&mut self.inbox)
+    }
+
+    /// Arm the engine to read the next response without sending any
+    /// command line. Used after manual transport writes (e.g. an
+    /// `sendfile` upload body) where the kit will respond with a
+    /// status line that isn't tied to a normal `submit`. Transitions
+    /// `Idle` -> `AwaitingHead(NoBinary)` so the next `recv` parses a
+    /// fresh response head.
+    pub fn expect_response(&mut self) -> Result<(), SubmitError> {
+        match self.state {
+            State::NeedBanner => Err(SubmitError::NotConnected),
+            State::Idle => {
+                self.state = State::AwaitingHead(HeadExpect::NoBinary);
+                Ok(())
+            }
+            State::AwaitingHead(_)
+            | State::ReadingMultiline { .. }
+            | State::ReadingBinary { .. }
+            | State::StreamingBody => Err(SubmitError::CommandInFlight),
+            State::Closed | State::Failed => Err(SubmitError::Unusable),
+        }
+    }
+
+    /// Return the engine to `Idle` after a streaming body has been
+    /// fully read off the transport. Any bytes the caller over-read
+    /// past the body end can be passed in `leftover`; they're folded
+    /// back into the inbox so the next command's response can pick
+    /// them up.
+    ///
+    /// No-op if the engine isn't in `StreamingBody`.
+    pub fn end_stream(&mut self, leftover: &[u8]) {
+        if !matches!(self.state, State::StreamingBody) {
+            return;
+        }
+        self.state = State::Idle;
+        if !leftover.is_empty() {
+            self.inbox.extend_from_slice(leftover);
+        }
+    }
+
+    /// Abandon a streaming body without having read it to the end.
+    /// The unread bytes are still queued on the wire, so the framing
+    /// position is lost: the engine is failed rather than returned to
+    /// `Idle`, which would let the next command parse body bytes as a
+    /// response head.
+    pub fn abort_stream(&mut self, unread: Option<u64>) {
+        if !matches!(self.state, State::StreamingBody) {
+            return;
+        }
+        self.fail(Error::StreamAbandoned { unread });
     }
 
     /// Pull the next protocol event, advancing the state machine if
@@ -264,8 +401,8 @@ impl ClientEngine {
                 // the inbox until the next command consumes them.
                 false
             }
-            State::AwaitingHead { binary_len } => {
-                let binary_len = *binary_len;
+            State::AwaitingHead(expect) => {
+                let expect = *expect;
                 let Some(line) = self.try_take_line() else {
                     return false;
                 };
@@ -299,21 +436,26 @@ impl ClientEngine {
                         };
                         true
                     }
-                    Classified::Success(SuccessCode::BinaryFollows) => {
-                        // Without binary_len we can't know where the
-                        // payload ends, so the next bytes would be
-                        // mis-framed as a new line. Fail loudly.
-                        let Some(len) = binary_len else {
+                    Classified::Success(SuccessCode::BinaryFollows) => match expect {
+                        HeadExpect::NoBinary => {
                             self.fail(Error::Transport(TransportError::MissingBinaryLen));
-                            return true;
-                        };
-                        self.state = State::ReadingBinary {
-                            head: head.rest,
-                            remaining: len,
-                            data: Vec::with_capacity(len),
-                        };
-                        true
-                    }
+                            true
+                        }
+                        HeadExpect::EagerBinary(len) => {
+                            self.state = State::ReadingBinary {
+                                head: head.rest,
+                                remaining: len,
+                                data: Vec::with_capacity(len),
+                            };
+                            true
+                        }
+                        HeadExpect::StreamBinary => {
+                            self.state = State::StreamingBody;
+                            self.events
+                                .push_back(ClientEvent::BinaryHead { head: head.rest });
+                            true
+                        }
+                    },
                     Classified::Success(SuccessCode::SendBinary) => {
                         // 204 hands the conversation to the caller: it
                         // owns the upload bytes and pushes them into
@@ -380,7 +522,7 @@ impl ClientEngine {
                 *remaining -= take;
                 true
             }
-            State::Closed | State::Failed => false,
+            State::StreamingBody | State::Closed | State::Failed => false,
         }
     }
 
@@ -590,30 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_line_is_capped_before_a_terminator_arrives() {
-        let mut engine = ClientEngine::new();
-        engine.recv(b"201- connected\r\n");
-        drive(&mut engine);
-        engine.submit("dbgname", None).unwrap();
-
-        // A peer that never sends LF must not grow the inbox forever.
-        let chunk = vec![b'A'; 4096];
-        let mut events = Vec::new();
-        for _ in 0..8 {
-            engine.recv(&chunk);
-            events.extend(drive(&mut engine));
-        }
-        assert!(
-            matches!(
-                events.last(),
-                Some(ClientEvent::Failed(e)) if matches!(**e, Error::Framing(FramingError::LineTooLong))
-            ),
-            "expected LineTooLong, got {events:?}"
-        );
-        assert!(engine.is_terminal());
-    }
-
-    #[test]
     fn close_read_emits_closed_event() {
         let mut e = ClientEngine::new();
         e.recv(b"201- connected\r\n");
@@ -687,6 +805,155 @@ mod tests {
         let mut e = ClientEngine::new();
         e.recv(b"201- connected\n");
         assert!(matches!(e.poll(), Some(ClientEvent::Connected)));
+    }
+
+    #[test]
+    fn streaming_submit_emits_binary_head_and_releases_inbox() {
+        let mut e = ClientEngine::new();
+        e.recv(b"201- connected\r\n");
+        let _ = drive(&mut e);
+        e.submit_streaming("getfile NAME=\"x\"").unwrap();
+        let _ = drain_send(&mut e);
+        e.recv(b"203- binary response follows\r\n\x04\x00\x00\x00DATA");
+        let evs = drive(&mut e);
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            ClientEvent::BinaryHead { head } => assert_eq!(head, "binary response follows"),
+            other => panic!("got {other:?}"),
+        }
+        let leftover = e.take_inbox();
+        assert_eq!(&leftover[..], b"\x04\x00\x00\x00DATA");
+        // Submit must be rejected while streaming.
+        assert!(matches!(
+            e.submit("ping", None),
+            Err(SubmitError::CommandInFlight)
+        ));
+        // Subsequent recv is ignored while streaming (caller owns the wire).
+        e.recv(b"junk");
+        assert!(e.take_inbox().is_empty());
+        // Returning over-read bytes via end_stream re-arms the engine.
+        e.end_stream(b"200- pong\r\n");
+        e.submit("ping", None).unwrap();
+        let _ = drain_send(&mut e);
+        match e.poll() {
+            Some(ClientEvent::Response(Response::Line { code, head })) => {
+                assert_eq!(code, SuccessCode::Ok);
+                assert_eq!(head, "pong");
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_submit_handles_non_binary_head_normally() {
+        // A streaming submit doesn't force 203: a 4xx should still flow
+        // through as a RemoteError so the connection isn't tied up.
+        let mut e = ClientEngine::new();
+        e.recv(b"201- connected\r\n");
+        let _ = drive(&mut e);
+        e.submit_streaming("getfile NAME=\"missing\"").unwrap();
+        let _ = drain_send(&mut e);
+        e.recv(b"402- file not found\r\n");
+        let evs = drive(&mut e);
+        match &evs[0] {
+            ClientEvent::RemoteError { code, message } => {
+                assert_eq!(code.raw(), 402);
+                assert_eq!(message, "file not found");
+            }
+            other => panic!("got {other:?}"),
+        }
+        // Engine is back at Idle.
+        e.submit("ping", None).unwrap();
+    }
+
+    #[test]
+    fn expect_response_arms_engine_for_unprompted_reply() {
+        let mut e = ClientEngine::new();
+        e.recv(b"201- connected\r\n");
+        let _ = drive(&mut e);
+        // 204 handshake on a sendfile-style command: the kit will reply
+        // 200 OK after the body, which we read by calling
+        // expect_response() and pumping again.
+        e.submit("sendfile NAME=\"a\" LENGTH=0x4", None).unwrap();
+        let _ = drain_send(&mut e);
+        e.recv(b"204- send binary\r\n");
+        let evs = drive(&mut e);
+        assert!(matches!(
+            evs[0],
+            ClientEvent::Response(Response::SendBinary { .. })
+        ));
+        e.expect_response().unwrap();
+        e.recv(b"200- ok\r\n");
+        match e.poll() {
+            Some(ClientEvent::Response(Response::Line {
+                code: SuccessCode::Ok,
+                ..
+            })) => {}
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_line_is_capped_before_a_terminator_arrives() {
+        let mut engine = ClientEngine::new();
+        engine.recv(b"201- connected\r\n");
+        drive(&mut engine);
+        engine.submit("dbgname", None).unwrap();
+
+        // A peer that never sends LF must not grow the inbox forever.
+        let chunk = vec![b'A'; 4096];
+        let mut events = Vec::new();
+        for _ in 0..8 {
+            engine.recv(&chunk);
+            events.extend(drive(&mut engine));
+        }
+        assert!(
+            matches!(
+                events.last(),
+                Some(ClientEvent::Failed(e)) if matches!(**e, Error::Framing(FramingError::LineTooLong))
+            ),
+            "expected LineTooLong, got {events:?}"
+        );
+        assert!(engine.is_terminal());
+    }
+
+    #[test]
+    fn abort_stream_fails_engine_instead_of_returning_to_idle() {
+        let mut engine = ClientEngine::new();
+        engine.recv(b"201- connected\r\n");
+        drive(&mut engine);
+        engine.submit_streaming("getfile").unwrap();
+        engine.recv(b"203- binary response follows\r\n");
+        drive(&mut engine);
+
+        engine.abort_stream(Some(64));
+        let events = drive(&mut engine);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ClientEvent::Failed(e)] if matches!(
+                    **e,
+                    Error::StreamAbandoned { unread: Some(64) }
+                )
+            ),
+            "got {events:?}"
+        );
+        assert!(engine.is_terminal());
+        // A failed engine must not accept another command.
+        assert!(matches!(
+            engine.submit("dbgname", None),
+            Err(SubmitError::Unusable)
+        ));
+    }
+
+    #[test]
+    fn end_stream_outside_streaming_state_is_noop() {
+        let mut e = ClientEngine::new();
+        e.recv(b"201- connected\r\n");
+        let _ = drive(&mut e);
+        e.end_stream(b"junk");
+        // Idle with no leftovers absorbed: a fresh submit still works.
+        e.submit("ping", None).unwrap();
     }
 
     #[test]

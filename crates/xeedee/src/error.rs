@@ -57,6 +57,16 @@ pub enum Error {
         expected: SuccessCode,
         got: SuccessCode,
     },
+
+    #[error("streaming body abandoned; connection framing lost")]
+    StreamAbandoned {
+        /// Bytes known to be still queued on the wire, or `None` when
+        /// the stream failed before the body length was established.
+        unread: Option<u64>,
+    },
+
+    #[error("client engine misuse")]
+    EngineMisuse(#[from] crate::client::SubmitError),
 }
 
 #[derive(Debug, Clone, Copy)]
