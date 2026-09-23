@@ -2451,6 +2451,8 @@ async fn run_capture(
             .await?;
         let total = download.total();
         if total == 0 {
+            // Release the streaming borrow before reusing `client`.
+            drop(download);
             eprintln!("{} segment {index}: empty, skipping", warn_tag("skip:"));
             let _ = client
                 .run(xeedee::commands::Delete {

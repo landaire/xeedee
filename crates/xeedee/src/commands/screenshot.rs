@@ -20,6 +20,7 @@
 //! `PixelFormat::Unknown(u32)` so callers can still access the raw bytes
 //! and decide how to interpret them.
 
+use bytes::BytesMut;
 use rootcause::prelude::*;
 
 use crate::client::Client;
@@ -29,14 +30,8 @@ use crate::commands::kv::value_u32;
 use crate::error::Error;
 use crate::error::FramingError;
 use crate::error::ParseError;
-use crate::protocol::Response;
-use crate::protocol::SuccessCode;
-use crate::protocol::framing::LineBuffer;
-use crate::protocol::framing::read_line;
-use crate::protocol::response::read_response;
 use futures_io::AsyncRead;
 use futures_io::AsyncWrite;
-use futures_util::AsyncWriteExt;
 use futures_util::io::AsyncReadExt;
 
 /// Metadata XBDM emits before the framebuffer bytes.
@@ -226,73 +221,96 @@ where
     /// Take a screenshot of the current HDMI scanout. Returns the typed
     /// metadata plus the raw framebuffer bytes.
     pub async fn screenshot(&mut self) -> Result<Screenshot, rootcause::Report<Error>> {
-        // Send "screenshot" command.
-        {
-            let (transport, _scratch) = self.transport_and_scratch();
-            transport
-                .write_all(b"screenshot\r\n")
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach("sending screenshot command")?;
-            transport
-                .flush()
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach("flushing screenshot command")?;
-        }
+        // 203 head; engine parks in StreamingBody after this.
+        let _head_text = self.submit_streaming("screenshot").await?;
+        let (transport, engine) = self.split_streaming();
+        let mut leftover = engine.take_inbox();
 
-        // Read the 203 head line, then the metadata line, then the raw bytes.
-        let (transport, scratch) = self.transport_and_scratch();
-        let head_response = read_response(transport, scratch, None).await?;
-        match head_response {
-            Response::Binary { .. } => {}
-            Response::Line {
-                code: SuccessCode::Ok,
-                head,
-            } => {
-                return Err(
-                    rootcause::Report::new(Error::from(FramingError::HeadTooShort)).attach(
-                        format!(
-                            "expected 203 binary follows for screenshot, got 200 OK ({head:?})"
-                        ),
-                    ),
-                );
+        // Right after the 203 head, XBDM sends a single ASCII metadata
+        // line terminated by CRLF, followed by the raw framebuffer.
+        // On any failure before the body is drained, the rest of the
+        // framebuffer is still queued on the wire and the connection
+        // can no longer be framed: fail the engine rather than return
+        // it to `Idle`.
+        let metadata_line = match read_line_buffered(transport, &mut leftover).await {
+            Ok(line) => line,
+            Err(e) => {
+                engine.abort_stream(None);
+                return Err(e);
             }
-            other => {
-                return Err(
-                    rootcause::Report::new(Error::from(FramingError::HeadTooShort))
-                        .attach(format!("expected 203 for screenshot, got {other:?}")),
-                );
+        };
+        let metadata = match parse_metadata_line(&metadata_line) {
+            Ok(m) => m,
+            Err(e) => {
+                engine.abort_stream(None);
+                return Err(rootcause::Report::new(Error::from(e)));
             }
-        }
+        };
 
-        let metadata_line = read_line(transport, scratch).await?;
-        let metadata = parse_metadata_line(&metadata_line)
-            .map_err(|e| rootcause::Report::new(Error::from(e)))?;
-
+        let total = u64::from(metadata.framebuffer_size);
         let mut data = vec![0u8; metadata.framebuffer_size as usize];
-        read_framebuffer(transport, scratch, &mut data).await?;
+        match read_framebuffer(transport, &mut leftover, &mut data).await {
+            Ok(()) => {
+                // Body drained; anything still buffered belongs to the
+                // next response.
+                engine.end_stream(&leftover);
+            }
+            Err(e) => {
+                engine.abort_stream(Some(total));
+                return Err(e);
+            }
+        }
 
         Ok(Screenshot { metadata, data })
     }
 }
 
+async fn read_line_buffered<R>(
+    reader: &mut R,
+    leftover: &mut BytesMut,
+) -> Result<String, rootcause::Report<Error>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut tmp = [0u8; 512];
+    loop {
+        if let Some(pos) = memchr::memchr(b'\n', leftover) {
+            let end = if pos > 0 && leftover[pos - 1] == b'\r' {
+                pos - 1
+            } else {
+                pos
+            };
+            let line = String::from_utf8(leftover[..end].to_vec())
+                .map_err(|_| rootcause::Report::new(Error::from(FramingError::NonUtf8Line)))?;
+            let _ = leftover.split_to(pos + 1);
+            return Ok(line);
+        }
+        let n = reader
+            .read(&mut tmp)
+            .await
+            .map_err(Error::from)
+            .into_report()
+            .attach("reading screenshot metadata line")?;
+        if n == 0 {
+            return Err(rootcause::Report::new(Error::ConnectionClosed));
+        }
+        leftover.extend_from_slice(&tmp[..n]);
+    }
+}
+
 async fn read_framebuffer<R>(
     reader: &mut R,
-    scratch: &mut LineBuffer,
+    leftover: &mut BytesMut,
     dest: &mut [u8],
 ) -> Result<(), rootcause::Report<Error>>
 where
     R: AsyncRead + Unpin,
 {
     let mut filled = 0usize;
-    if !scratch.as_bytes().is_empty() {
-        let leftover = scratch.as_bytes();
+    if !leftover.is_empty() {
         let take = core::cmp::min(leftover.len(), dest.len());
         dest[..take].copy_from_slice(&leftover[..take]);
-        scratch.buf.drain(..take);
+        let _ = leftover.split_to(take);
         filled = take;
     }
     while filled < dest.len() {

@@ -12,6 +12,7 @@
 //! enforced by [`FileDownload`] borrowing the transport mutably from the
 //! client until it is fully consumed.
 
+use bytes::BytesMut;
 use futures_io::AsyncRead;
 use futures_io::AsyncWrite;
 use futures_util::io::AsyncReadExt;
@@ -23,14 +24,13 @@ use std::task::Context;
 use std::task::Poll;
 
 use crate::client::Client;
+use crate::client::ClientEngine;
 use crate::client::Connected;
 use crate::error::Error;
 use crate::error::FramingError;
 use crate::protocol::ArgBuilder;
 use crate::protocol::Response;
 use crate::protocol::SuccessCode;
-use crate::protocol::framing::LineBuffer;
-use crate::protocol::response::read_response;
 
 /// Maximum file size we'll consume in a single prefix-length getfile.
 /// XBDM on-device caps payloads around ~5 MiB per range; this bound just
@@ -45,7 +45,11 @@ pub const MAX_PREFIX_LENGTH: u64 = 1 << 32;
 #[derive(Debug)]
 pub struct FileDownload<'a, T> {
     transport: &'a mut T,
-    scratch: &'a mut LineBuffer,
+    engine: &'a mut ClientEngine,
+    /// Body bytes captured by the same socket read that pulled in the
+    /// 203 head, plus any additional bytes the length-prefix probe
+    /// over-read. Drained before any transport read.
+    leftover: BytesMut,
     total: u64,
     read_so_far: u64,
 }
@@ -54,15 +58,6 @@ impl<'a, T> FileDownload<'a, T>
 where
     T: AsyncRead + Unpin,
 {
-    fn new(transport: &'a mut T, scratch: &'a mut LineBuffer, total: u64) -> Self {
-        Self {
-            transport,
-            scratch,
-            total,
-            read_so_far: 0,
-        }
-    }
-
     pub fn total(&self) -> u64 {
         self.total
     }
@@ -122,13 +117,29 @@ where
     }
 }
 
-impl<'a, T: AsyncRead + Unpin> AsyncRead for FileDownload<'a, T> {
+impl<T> Drop for FileDownload<'_, T> {
+    fn drop(&mut self) {
+        let remaining = self.total.saturating_sub(self.read_so_far);
+        if remaining > 0 {
+            // Unread body bytes are still queued on the wire; the
+            // connection can no longer be framed. Fail the engine
+            // rather than hand back a reusable-looking client.
+            self.engine.abort_stream(Some(remaining));
+            return;
+        }
+        // Body fully consumed. `leftover` past the body belongs to the
+        // next response, so hand it back to the engine.
+        self.engine.end_stream(&self.leftover);
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for FileDownload<'_, T> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        let remaining = self.remaining();
+        let remaining = self.total.saturating_sub(self.read_so_far);
         if remaining == 0 {
             return Poll::Ready(Ok(0));
         }
@@ -136,17 +147,13 @@ impl<'a, T: AsyncRead + Unpin> AsyncRead for FileDownload<'a, T> {
         let slice = &mut buf[..cap];
 
         let this = &mut *self;
-        // Before issuing a fresh read, if the line buffer contains leftover
-        // bytes from the previous response read, drain those first. This
-        // would be rare in practice: the 203 line has already been parsed,
-        // but any byte captured after the CRLF is part of our payload.
-        if !this.scratch.as_bytes().is_empty() {
-            let leftover = this.scratch.as_bytes();
-            let copy_len = core::cmp::min(leftover.len(), slice.len());
-            slice[..copy_len].copy_from_slice(&leftover[..copy_len]);
-            this.scratch.buf.drain(..copy_len);
-            this.read_so_far += copy_len as u64;
-            return Poll::Ready(Ok(copy_len));
+        // Drain captured leftover bytes ahead of any new transport read.
+        if !this.leftover.is_empty() {
+            let take = core::cmp::min(this.leftover.len(), slice.len());
+            slice[..take].copy_from_slice(&this.leftover[..take]);
+            let _ = this.leftover.split_to(take);
+            this.read_so_far += take as u64;
+            return Poll::Ready(Ok(take));
         }
         let pinned = Pin::new(&mut *this.transport);
         match pinned.poll_read(cx, slice) {
@@ -173,8 +180,7 @@ impl<'a, T: AsyncRead + Unpin> AsyncRead for FileDownload<'a, T> {
 /// connection in a broken state, so prefer the convenience consumers.
 #[derive(Debug)]
 pub struct FileUpload<'a, T> {
-    transport: &'a mut T,
-    scratch: &'a mut LineBuffer,
+    client: &'a mut Client<T, Connected>,
     declared: u64,
     sent_so_far: u64,
 }
@@ -183,15 +189,6 @@ impl<'a, T> FileUpload<'a, T>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    fn new(transport: &'a mut T, scratch: &'a mut LineBuffer, declared: u64) -> Self {
-        Self {
-            transport,
-            scratch,
-            declared,
-            sent_so_far: 0,
-        }
-    }
-
     pub fn declared(&self) -> u64 {
         self.declared
     }
@@ -274,13 +271,7 @@ where
                     .attach(msg),
             );
         }
-        self.transport
-            .flush()
-            .await
-            .map_err(Error::from)
-            .into_report()
-            .attach("flushing final upload chunk")?;
-        let response = read_response(self.transport, self.scratch, None).await?;
+        let response = self.client.read_post_upload_response().await?;
         match response {
             Response::Line {
                 code: SuccessCode::Ok,
@@ -294,7 +285,7 @@ where
     }
 }
 
-impl<'a, T: AsyncWrite + Unpin> AsyncWrite for FileUpload<'a, T> {
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for FileUpload<'_, T> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -310,7 +301,7 @@ impl<'a, T: AsyncWrite + Unpin> AsyncWrite for FileUpload<'a, T> {
         }
         let cap = core::cmp::min(buf.len() as u64, remaining) as usize;
         let slice = &buf[..cap];
-        let pinned = Pin::new(&mut *this.transport);
+        let pinned = Pin::new(this.client.transport_mut());
         match pinned.poll_write(cx, slice) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
@@ -322,11 +313,11 @@ impl<'a, T: AsyncWrite + Unpin> AsyncWrite for FileUpload<'a, T> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut *self.transport).poll_flush(cx)
+        Pin::new(self.client.transport_mut()).poll_flush(cx)
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut *self.transport).poll_close(cx)
+        Pin::new(self.client.transport_mut()).poll_close(cx)
     }
 }
 
@@ -361,63 +352,39 @@ where
         };
         let wire = line.finish();
 
-        let mut framed = wire;
-        framed.push_str("\r\n");
-        {
-            let (transport, _scratch) = self.transport_and_scratch();
-            transport
-                .write_all(framed.as_bytes())
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach("sending getfile command")?;
-            transport
-                .flush()
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach("flushing getfile command")?;
-        }
-
-        {
-            let (transport, scratch) = self.transport_and_scratch();
-            let response = read_response(transport, scratch, None).await?;
-            match response {
-                Response::Binary { .. } => {}
-                Response::Line { code, .. } => {
-                    return Err(rootcause::Report::new(Error::UnexpectedSuccessCode {
-                        expected: SuccessCode::BinaryFollows,
-                        got: code,
-                    }));
-                }
-                other => {
-                    return Err(
-                        rootcause::Report::new(Error::from(FramingError::HeadTooShort))
-                            .attach(format!("expected 203 binary follows, got {other:?}")),
-                    );
-                }
-            }
-        }
+        // 203 head; engine parks in StreamingBody after this.
+        let _head_text = self.submit_streaming(&wire).await?;
+        let (transport, engine) = self.split_streaming();
+        let mut leftover = engine.take_inbox();
 
         // Both forms of getfile emit a 4-byte LE length prefix after the
         // 203 line. For the ranged form we cross-check against the SIZE
         // we asked for and surface a mismatch as a framing error.
-        let advertised = {
-            let (transport, scratch) = self.transport_and_scratch();
-            read_length_prefix(transport, scratch).await?
+        let advertised = match read_length_prefix(transport, &mut leftover).await {
+            Ok(n) => n,
+            Err(e) => {
+                engine.end_stream(&[]);
+                return Err(e);
+            }
         };
         if let Some(requested) = expected_size
             && advertised != requested
         {
+            engine.end_stream(&[]);
             return Err(
-                    rootcause::Report::new(Error::from(FramingError::TrailingGarbageInHead))
-                        .attach(format!(
-                            "ranged getfile requested {requested} bytes but server advertised {advertised}"
-                        )),
-                );
+                rootcause::Report::new(Error::from(FramingError::TrailingGarbageInHead))
+                    .attach(format!(
+                        "ranged getfile requested {requested} bytes but server advertised {advertised}"
+                    )),
+            );
         }
-        let (transport, scratch) = self.transport_and_scratch();
-        Ok(FileDownload::new(transport, scratch, advertised))
+        Ok(FileDownload {
+            transport,
+            engine,
+            leftover,
+            total: advertised,
+            read_so_far: 0,
+        })
     }
 }
 
@@ -465,56 +432,41 @@ where
                 .finish(),
         };
 
-        let mut framed = line;
-        framed.push_str("\r\n");
-        {
-            let (transport, _scratch) = self.transport_and_scratch();
-            transport
-                .write_all(framed.as_bytes())
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach("sending upload command")?;
-            transport
-                .flush()
-                .await
-                .map_err(Error::from)
-                .into_report()
-                .attach("flushing upload command")?;
-        }
-
-        {
-            let (transport, scratch) = self.transport_and_scratch();
-            let response = read_response(transport, scratch, None).await?;
-            match response {
-                Response::SendBinary { .. } => {}
-                Response::Line {
-                    code: SuccessCode::Ok,
-                    head,
-                } => {
-                    return Err(
-                        rootcause::Report::new(Error::from(FramingError::HeadTooShort)).attach(
-                            format!("expected 204 send-binary but got 200 OK ({head:?})"),
-                        ),
-                    );
-                }
-                other => {
-                    return Err(
-                        rootcause::Report::new(Error::from(FramingError::HeadTooShort))
-                            .attach(format!("expected 204 send-binary, got {other:?}")),
-                    );
-                }
+        // 204 send-binary. Engine returns to Idle after this; the body
+        // is then written raw to the transport, and the post-upload 200
+        // is collected by `read_post_upload_response()` from `finish`.
+        let response = self.send_raw(&line).await?;
+        match response {
+            Response::SendBinary { .. } => {}
+            Response::Line {
+                code: SuccessCode::Ok,
+                head,
+            } => {
+                return Err(
+                    rootcause::Report::new(Error::from(FramingError::HeadTooShort)).attach(
+                        format!("expected 204 send-binary but got 200 OK ({head:?})"),
+                    ),
+                );
+            }
+            other => {
+                return Err(
+                    rootcause::Report::new(Error::from(FramingError::HeadTooShort))
+                        .attach(format!("expected 204 send-binary, got {other:?}")),
+                );
             }
         }
 
-        let (transport, scratch) = self.transport_and_scratch();
-        Ok(FileUpload::new(transport, scratch, kind.size()))
+        Ok(FileUpload {
+            client: self,
+            declared: kind.size(),
+            sent_so_far: 0,
+        })
     }
 }
 
 async fn read_length_prefix<R>(
     reader: &mut R,
-    scratch: &mut LineBuffer,
+    leftover: &mut BytesMut,
 ) -> Result<u64, rootcause::Report<Error>>
 where
     R: AsyncRead + Unpin,
@@ -522,11 +474,10 @@ where
     let mut prefix = [0u8; 4];
     let mut filled = 0usize;
 
-    if !scratch.as_bytes().is_empty() {
-        let leftover = scratch.as_bytes();
+    if !leftover.is_empty() {
         let take = core::cmp::min(leftover.len(), prefix.len());
         prefix[..take].copy_from_slice(&leftover[..take]);
-        scratch.buf.drain(..take);
+        let _ = leftover.split_to(take);
         filled = take;
     }
     while filled < prefix.len() {
