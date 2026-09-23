@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> threadinfo THREAD=0xfb000000\r\n
+S> 202- thread info follows\r\nsuspend=0 priority=13 tlsbase=0x3c07cb50 start=0x8177abb8 base=0x7c160000 limit=0x7c150000 slack=0x00000540 createhi=0x01dd3874 createlo=0xeb9698e0 nameaddr=0x3c0c5e08 namelen=0x0000000e proc=0x05 lasterr=0x00000000\r\n.\r\n
+C> bye\r\n
+S> 200- bye\r\n

@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> consolemem\r\n
+S> 200- consolemem=0x2\r\n
+C> bye\r\n
+S> 200- bye\r\n

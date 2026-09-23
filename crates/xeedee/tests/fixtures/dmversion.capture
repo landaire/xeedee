@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> dmversion\r\n
+S> 200- 2.0.21256.0\r\n
+C> bye\r\n
+S> 200- bye\r\n

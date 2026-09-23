@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> modsections NAME="xbdm.xex"\r\n
+S> 202- multiline response follows\r\nname=".rdata" base=0x91f00400 size=0x0000f33c index=1 flags=2\r\nname=".pdata" base=0x91f0f800 size=0x00002e80 index=2 flags=2\r\nname=".text" base=0x91f13000 size=0x00082d94 index=3 flags=10\r\nname=".data" base=0x91f96000 size=0x00018b20 index=4 flags=6\r\nname=".edata" base=0x91faf000 size=0x00000618 index=5 flags=2\r\nname=".idata" base=0x91fb0000 size=0x000004bc index=6 flags=6\r\nname=".XBLD" base=0x91fb1000 size=0x000000c0 index=7 flags=2\r\nname=".reloc" base=0x91fb1200 size=0x00007fd4 index=8 flags=2\r\n.\r\n
+C> bye\r\n
+S> 200- bye\r\n

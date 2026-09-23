@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> querypc NAME="Debugger Pages" TYPE=0x00000001\r\n
+S> 202- counter data follows\r\ntype=0x00000000 vallo=0x00000000 valhi=0x00000000 ratelo=0x3c07cb50 ratehi=0x0000000d\r\n.\r\n
+C> bye\r\n
+S> 200- bye\r\n

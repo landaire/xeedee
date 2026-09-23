@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> pclist\r\n
+S> 202- multiline response follows\r\nname="%Thread5 DPC" type=0x00000021\r\nname="Debugger Pages" type=0x00000001\r\nname="Contiguous Pages" type=0x00000001\r\nname="%Thread3 ISR" type=0x00000021\r\nname="% GPU Frontend" type=0x00000021\r\nname="%Thread2 DPC" type=0x00000021\r\nname="VM Pages" type=0x00000001\r\nname="Pool Pages" type=0x00000001\r\nname="%Thread0 ISR" type=0x00000021\r\nname="Frame Ticks" type=0x00000001\r\nname="Image Pages" type=0x00000001\r\nname="%Thread4 ISR" type=0x00000021\r\nname="Frames" type=0x00000011\r\nname="%Thread1 ISR" type=0x00000021\r\nname="%Thread0 DPC" type=0x00000021\r\nname="Cache Pages" type=0x00000001\r\nname="%Thread3 DPC" type=0x00000021\r\nname="% GPU Backend" type=0x00000021\r\nname="Stack Pages" type=0x00000001\r\nname="% GPU" type=0x00000021\r\nname="%Thread2 ISR" type=0x00000021\r\nname="%Thread5 ISR" type=0x00000021\r\nname="%Thread4 DPC" type=0x00000021\r\nname="%Thread2 Idle" type=0x00000021\r\nname="%Thread1 Idle" type=0x00000021\r\nname="% GPU Swap Stall" type=0x00000021\r\nname="Free Pages" type=0x00000001\r\nname="%Thread5 Idle" type=0x00000021\r\nname="%Thread4 Idle" type=0x00000021\r\nname="%Thread3 Idle" type=0x00000021\r\nname="%Thread1 DPC" type=0x00000021\r\nname="%Thread0 Idle" type=0x00000021\r\n.\r\n
+C> bye\r\n
+S> 200- bye\r\n

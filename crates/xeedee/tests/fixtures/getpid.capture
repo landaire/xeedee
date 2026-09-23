@@ -1,0 +1,6 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> getpid\r\n
+S> 200- pid=0xf24eabcd\r\n
+C> bye\r\n
+S> 200- bye\r\n
