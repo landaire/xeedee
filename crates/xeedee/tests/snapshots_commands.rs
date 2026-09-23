@@ -17,6 +17,7 @@ use xeedee::commands::GetFileAttributes;
 use xeedee::commands::GetFileRange;
 use xeedee::commands::IsStopped;
 use xeedee::commands::Modules;
+use xeedee::commands::PixelFormat;
 use xeedee::commands::SetMem;
 use xeedee::commands::SysTime;
 use xeedee::commands::ThreadId;
@@ -196,6 +197,28 @@ fn getfile_streams_prefixed_payload() {
     });
     assert_eq!(total, 14);
     assert_eq!(bytes, b"hello, xbdm!\r\n");
+}
+
+#[test]
+fn screenshot_streams_metadata_and_framebuffer() {
+    let log = fixture("screenshot_small");
+    let mock = MockTransport::from_log(log).with_lax_writes();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shot = runtime.block_on(async move {
+        let mut client = Client::new(mock).read_banner().await.unwrap();
+        client.screenshot().await.unwrap()
+    });
+    assert_eq!(shot.metadata.pitch, 0x10);
+    assert_eq!(shot.metadata.width, 4);
+    assert_eq!(shot.metadata.height, 2);
+    assert_eq!(shot.metadata.format, PixelFormat::LeX8R8G8B8);
+    assert_eq!(shot.metadata.framebuffer_size, 0x20);
+    assert_eq!(shot.data.len(), 0x20);
+    assert_eq!(&shot.data[..4], &[0x10, 0x20, 0x30, 0xFF]);
+    assert_eq!(&shot.data[28..], &[0x17, 0x27, 0x37, 0xFF]);
 }
 
 #[test]

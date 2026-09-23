@@ -1,0 +1,4 @@
+# xbdm capture v1
+S> 201- connected\r\n
+C> screenshot\r\n
+S> 203- binary response follows\r\npitch=0x00000010 width=0x00000004 height=0x00000002 format=0x98280186 offsetx=0x00000000 offsety=0x00000000, framebuffersize=0x00000020 sw=0x00000004 sh=0x00000002 colorspace=0x0\r\n\x10 0\xff\x11!1\xff\x12"2\xff\x13#3\xff\x14$4\xff\x15%5\xff\x16&6\xff\x17'7\xff
